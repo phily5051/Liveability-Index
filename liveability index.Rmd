@@ -1126,7 +1126,7 @@ for (div_w in seq(1, length(diversity_weights))) {
   }
 }
 
-# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_rank_exp_450.csv'
+# file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_rank_exp_450.csv'
 # write_csv(ua_output_exp, file_path)
 ```
 
@@ -1240,7 +1240,7 @@ for (div_w in seq(1, length(diversity_weights))) {
   }
 }
 
-# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_minmax_450.csv'
+# file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_minmax_450.csv'
 # write_csv(ua_output_mm, file_path)
 ```
 
@@ -1354,7 +1354,7 @@ for (div_w in seq(1, length(diversity_weights))) {
   }
 }
 
-# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_ss_450.csv'
+# file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_ss_450.csv'
 # write_csv(ua_output_ss, file_path)
 ```
 
@@ -1468,7 +1468,7 @@ for (div_w in seq(1, length(diversity_weights))) {
   }
 }
 
-# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_robust_450.csv'
+# file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_robust_450.csv'
 # write_csv(ua_output_rs, file_path)
 ```
 
@@ -1483,7 +1483,7 @@ ua_output_ss <- rename(ua_output_ss, li_norm_score = li_ss)
 # Then combine them using rbind
 ua_output <- rbind(ua_output_exp, ua_output_mm, ua_output_rs, ua_output_ss)
 
-file_path = 'C:/Users/phily/liveability-index/data/uncertainty test/ua_data_final_450.csv'
+file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_data_final_450.csv'
 write.csv(ua_output, file_path)
 ```
 
@@ -1501,7 +1501,7 @@ baseline <- ua_output %>%
   select(nb_clus, li_rank_b = li_rank)
 
 # save reference ranking to csv for use in sensitivity analysis
-write_csv(baseline, 'C:/Users/phily/liveability-index/data/uncertainty test/li_reference_rank_450.csv')
+write_csv(baseline, 'C:/Users/phily/liveability-index/data/uncertainty analysis/li_reference_rank_450.csv')
 ```
 
 ### 6.3.2. Summary stats
@@ -1513,7 +1513,7 @@ ua_final <- ua_output %>%
          rank_change_perc = li_rank_change / 399)
 
 # save data
-write_csv(ua_final, 'C:/Users/phily/liveability-index/data/uncertainty test/ua_all_tests_rank_change_450.csv')
+write_csv(ua_final, 'C:/Users/phily/liveability-index/data/uncertainty analysis/ua_all_tests_rank_change_450.csv')
 ```
 
 
@@ -1608,7 +1608,7 @@ head(dev_all)
 dev_all %>% group_by(test) %>% dplyr::summarise(count = n())
 
 # save data
-write_csv(dev_all, 'C:/Users/phily/liveability-index/data/uncertainty test/rank_dev_all_450.csv')
+write_csv(dev_all, 'C:/Users/phily/liveability-index/data/uncertainty analysis/rank_dev_all_450.csv')
 ```
 
 ## 6.5. Plots 
@@ -1646,7 +1646,7 @@ myplot2 <- ggplot(dev_all, aes(x = test, y = rank_dev, fill = test)) +
         legend.position = 'none')             # Remove the legend
 
 myplot2
-ggsave('C:/Users/phily/liveability-index/output/uncertainty test/sd_mean_rank_450.png', plot = myplot2, width = 10, height = 8, dpi = 300)
+ggsave('C:/Users/phily/liveability-index/output/uncertainty analysis/sd_mean_rank_450.png', plot = myplot2, width = 10, height = 8, dpi = 300)
 ```
 
 
@@ -1694,7 +1694,7 @@ myplot1<- ggplot(lad_rank_for_288_tests, aes(x = LAD, y = LAD_rank)) +
 
 myplot1
 
-ggsave('C:/Users/phily/liveability-index/output/uncertainty test/ua_rank_simulation_450.png', plot = myplot1, width = 12, height = 12, dpi = 300)
+ggsave('C:/Users/phily/liveability-index/output/uncertainty analysis/ua_rank_simulation_450.png', plot = myplot1, width = 12, height = 12, dpi = 300)
 ```
 
 ### 6.5.3. LAD Rankings by normalisation factor
@@ -1742,7 +1742,7 @@ myplot2
 
 
 
-ggsave('C:/Users/phily/liveability-index/output/uncertainty test/ua_rank_simulation_norm_450.png', plot = myplot2, width = 12, height = 12, dpi = 300)
+ggsave('C:/Users/phily/liveability-index/output/uncertainty analysis/ua_rank_simulation_norm_450.png', plot = myplot2, width = 12, height = 12, dpi = 300)
 ```
 
 ### 6.5.4. LAD Rankings by diversity
@@ -1796,7 +1796,7 @@ myplot3
 
 
 
-ggsave('C:/Users/phily/liveability-index/output/uncertainty test/ua_rank_simulation_div_450.png', plot = myplot3, width = 12, height = 12, dpi = 300)
+ggsave('C:/Users/phily/liveability-index/output/uncertainty analysis/ua_rank_simulation_div_450.png', plot = myplot3, width = 12, height = 12, dpi = 300)
 ```
 
 
@@ -1843,7 +1843,7 @@ sd <- sd(avg_sft_LAD$Rs) # 0.334
 mean <- mean(avg_sft_LAD$Rs) # 1.238
 
 # step 8: save file
-file_path = 'C:/Users/phily/liveability-index/data/uncertainty test/average_shift_lad_450.csv'
+file_path = 'C:/Users/phily/liveability-index/data/uncertainty analysis/average_shift_lad_450.csv'
 write.csv(avg_sft_LAD, file_path, row.names = F)
 ```
 
