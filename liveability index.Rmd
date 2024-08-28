@@ -1,7 +1,7 @@
 ---
 title: "Liveability Index"
 output: html_document
-date: "2024-08-27"
+date: "2024-08-28"
 ---
 
 # 1. Diversity Domain Indicators
@@ -14,12 +14,12 @@ library(tidyverse)
 ## 1.1. Data Import
 ```{r read in data}
 # read in data
-nb_entropy <- st_read('C:/Users/phily/Liveability-Index/data/pois_london.geojson') %>% 
+nb_entropy <- st_read('C:/Users/phily/liveability-index/data/pois_london.geojson') %>% 
   select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 
             'GSS_CODE')) %>% 
   st_transform(., 27700)
 
-nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>%
+nb_polygon <- st_read('C:/Users/phily/liveability-index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>%
   st_transform(., 27700) 
 
 
@@ -27,7 +27,7 @@ nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final
 nb_entropy <- st_intersection(nb_entropy, nb_polygon)
 
 # save nb_entropy
-st_write(nb_entropy, 'C:/Users/phily/Liveability-Index/data/nb_netropy.gpkg')
+# st_write(nb_entropy, 'C:/Users/phily/liveability-index/data/nb_netropy.gpkg')
 ```
 
 ## 1.2. Entropy Calculation
@@ -86,7 +86,7 @@ nb_entropy_wide <- nb_entropy_wide %>% select(-Other)
 
 
 # Save the dataframe as a CSV file
-file_path = "C:/Users/phily/Liveability-Index/data/domain data/diversity/diversity_indicator_nb_450.csv"
+file_path = "C:/Users/phily/liveability-index/data/domain data/diversity/diversity_indicator_nb_450.csv"
 st_write(nb_entropy_wide, file_path, row.names = FALSE)
 ```
 
@@ -107,7 +107,7 @@ library(concaveman)
 nb_centroids <- nb_polygon %>% st_centroid()
 
 # save data
-file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/origin_coords_450.geojson"
+file_path = "C:/Users/phily/liveability-index/data/domain data/proximity/origin_coords_450.geojson"
 
 st_write(nb_centroids, file_path, driver = 'GeoJSON')
 ```
@@ -173,7 +173,7 @@ dest_coords <- dest_coords %>%
 # destination points coordinates - coordinates indicate the center of mass for each urban service within neighbourhoods
 dest_coords <- dest_coords %>% arrange(nb_clus)
 
-file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/dest_coords_450.geojson"
+file_path = "C:/Users/phily/liveability-index/data/domain data/proximity/dest_coords_450.geojson"
 
 st_write(dest_coords, file_path, driver = 'GeoJSON')
 ```
@@ -243,7 +243,7 @@ proximity_wide <- proximity_wide %>% select(-Other)
 For those neighbourhoods which miss any of the five urban services, the network distance to the closest center of mass for that missing urban service in neighbouring neighbourhoods will be calculated.
 
 ```{r}
-edges <- st_read('C:/Users/phily/Liveability-Index/data/network/sf_all_london.gpkg', layer = "edges") %>% st_transform(., 27700)
+edges <- st_read('C:/Users/phily/liveability-index/data/network/sf_all_london.gpkg', layer = "edges") %>% st_transform(., 27700)
 
 # create unique edge identifier
 edges <- edges %>% dplyr::select(from, to, highway, length, geom) %>% dplyr::mutate(edgeID = c(1:n())) %>%
@@ -639,7 +639,7 @@ max(proximity_wide$p_h) # 3070
 
 
 ```{r data save}
-file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/proximity_indicator_nb_450.csv"
+file_path = "C:/Users/phily/liveability-index/data/domain data/proximity/proximity_indicator_nb_450.csv"
 
 write.csv(proximity_wide, file_path, row.names = FALSE)
 ```
@@ -648,7 +648,7 @@ write.csv(proximity_wide, file_path, row.names = FALSE)
 # 3. Population Density Indicator
 ```{r}
 # read in hexagon population data
-hex_pop <- st_read('C:/Users/phily/Liveability-Index/data/domain data/pop/hexagon_pop.geojson') %>% st_transform(27700)
+hex_pop <- st_read('C:/Users/phily/liveability-index/data/domain data/pop/hexagon_pop.geojson') %>% st_transform(27700)
 ```
 
 
