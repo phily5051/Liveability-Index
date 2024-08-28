@@ -2081,7 +2081,7 @@ plot5 <- ggplot(lci_long, aes(x = LAD, y = value, fill = Indicator)) +
   ggtitle("Decomposition of Liveability Index into 11 Indicators") +
   scale_fill_discrete(name = 'Indicator', labels = legend_names) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+  theme(axis.text.x = element_text(angle = 50, hjust = 1, size = 11.5, family = 'sans'),
         axis.text.y = element_text(size = 11.5, family = 'sans'),
         axis.title = element_text(size = 14, family = 'sans'),
         plot.title = element_text(face = "bold", hjust = 0.5, size = 15, family = 'sans'),
