@@ -1864,8 +1864,6 @@ lci_1 <- left_join(lci,
                    nb_polygon,
                    by = 'nb_clus') %>%
   st_as_sf()
-
-str(lci_1)
 ```
 
 
@@ -2004,8 +2002,77 @@ tmap_save(plot4, 'C:/Users/phily/liveability-index/output/results/density_domain
 
 ```
 
+## 7.6. Combined Domain Plot
+```{r}
+# Create the map plots
+# plot each map
+tm1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = FALSE) +
+  tm_layout(frame = F) +
+  tm_credits("Diversity Domain", position = c(0.24,0.91), size=1.5)
 
-## 7.6. Decomposition of Indicators 
+
+  
+tm2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_layout(frame = F) +
+  tm_credits("Proximity Domain", position = c(0.24,0.91), size=1.5)
+  
+  
+  
+tm3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn",
+              style = 'cat',
+              title = 'Decile') +
+  tm_legend(show = F) +
+  tm_layout(frame = F) +
+  tm_credits('Population Density Domain', position =c(0.11,0.91), size=1.5)  
+
+  
+  
+# legend
+legend <- tm_shape(lci_1) +
+  tm_polygons('div_decile',
+              palette = "RdYlGn",
+              title = 'Decile',
+              style = 'cat') +
+  tm_scale_bar(position = c(0.315, 0.2), text.size = 0.9) +
+  tm_compass(north=0, position=c(0.65,0.6))+
+  tm_layout(legend.only = T,
+            legend.position = c('center', 'center'), 
+            legend.height = 3.5,
+            legend.width = 4,
+            asp = 0.1)
+
+
+t = tmap_arrange(tm1, tm2, tm3, legend, ncol=2)
+
+t
+
+tmap_save(t, 'C:/Users/phily/liveability-index/output/results/combined_domain.png', height = 9, width = 10, dpi = 300)
+```
+
+
+
+## 7.7. Decomposition of Indicators 
 ```{r}
 # left join with LCI
 lci_2 <- left_join(lci,
@@ -2044,7 +2111,7 @@ lci_per_borough$mean_p_l_score <- lci_per_borough$mean_p_l_score * 1/11
 lci_per_borough$mean_p_h_score <- lci_per_borough$mean_p_h_score * 1/11
 ```
 
-### 7.6.1. LAD Decomposition Plot
+### 7.7.1. LAD Decomposition Plot
 ```{r}
 library(ggplot2)
 
@@ -2092,7 +2159,7 @@ plot5
 ggsave('C:/Users/phily/liveability-index/output/results/decomposed_LI.png', plot5, height = 10, width = 10, dpi = 300)
 ```
 
-### 7.6.2 Normalisation of Indicator Scores - Top 3 Boroughs
+### 7.7.2 Normalisation of Indicator Scores - Top 3 Boroughs
 ```{r Top 3 Decomposed}
 # Find the maximum score for each indicator
 max_scores <- lci_long %>%
@@ -2168,7 +2235,7 @@ print(plot_combined)
 ggsave('C:/Users/phily/liveability-index/output/results/top3_decomposed_500.png' ,plot_combined, dpi = 300, width = 18, height = 10)
 ```
 
-### 7.6.3. Normalisation of Indicator Scores - Bottom 3 Boroughs
+### 7.7.3. Normalisation of Indicator Scores - Bottom 3 Boroughs
 ```{r Top 3 Decomposed}
 bottom_3_boroughs <- lci_per_borough %>%
   arrange(desc(sum_indicators)) %>%
