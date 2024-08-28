@@ -1,0 +1,3096 @@
+---
+title: "Liveability Index"
+output: html_document
+date: "2024-08-27"
+---
+
+# 1. Diversity Domain Indicators
+```{r packages}
+library(sf)
+library(dplyr)
+library(tidyverse)
+```
+
+## 1.1. Data Import
+```{r read in data}
+# read in data
+nb_entropy <- st_read('C:/Users/phily/Liveability-Index/data/pois_london.geojson') %>% 
+  select(-c('osmid', 'name','detailed_urban_service', 'lon', 'lat', 
+            'GSS_CODE')) %>% 
+  st_transform(., 27700)
+
+nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>%
+  st_transform(., 27700) 
+
+
+# intersect two data
+nb_entropy <- st_intersection(nb_entropy, nb_polygon)
+
+# save nb_entropy
+st_write(nb_entropy, 'C:/Users/phily/Liveability-Index/data/nb_netropy.gpkg')
+```
+
+## 1.2. Entropy Calculation
+```{r entropy calculation}
+# group by cluster, 15minute service and amenity
+diversity <- nb_entropy %>%
+  group_by(nb_clus, X15minute_6_urban_service, amenity) %>% 
+  summarise(counted = n())
+
+
+# separate diversity based on the number of counts
+## point data
+diversity_point <- diversity %>% 
+  filter(counted == 1)
+
+
+## multipoint
+diversity_multipoint <- diversity %>%
+  filter(counted != 1)
+
+
+# entropy calculation 
+# the smallest entropy value is 0 when there is only one kind of amenity
+# to differentiate between an area with only one amenity for that specific urban service category and an area with no amenities at all,
+# A neighbourhood with no amenities will be assigned a score of -1, while a neighbourhood with only one kind of amenity will get a score of 0 following the entropy equation
+
+nb_entropy <- diversity %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  mutate(total_count = sum(counted)) %>%
+  mutate(probability = counted / sum(counted),
+         entropy = -sum(probability * log(probability))) %>%
+  distinct(nb_clus, X15minute_6_urban_service, .keep_all = TRUE) %>%
+  select(nb_clus, X15minute_6_urban_service, entropy)
+
+min(nb_entropy$entropy) # 0
+max(nb_entropy$entropy) # 3.799
+```
+
+
+```{r data format change}
+# convert data format to a wide one
+# Pivot the table from long to wide format
+test <- nb_entropy %>% st_drop_geometry()
+
+nb_entropy_wide <- test %>%
+  pivot_wider(names_from = X15minute_6_urban_service, values_from = entropy, names_prefix = "") %>%
+  rename(d_c = Commerce, d_l = Living, d_edu = Education,
+         d_enter = Entertainment, d_h = Healthcare) 
+
+# fill NA values with -1
+# those neighbourhoods which do not have amenities on specific urban service categories
+# will be given a diversity value of zero
+nb_entropy_wide <- replace(nb_entropy_wide, is.na(nb_entropy_wide), -1) 
+nb_entropy_wide <- nb_entropy_wide %>% select(-Other)
+
+
+
+# Save the dataframe as a CSV file
+file_path = "C:/Users/phily/Liveability-Index/data/domain data/diversity/diversity_indicator_nb_450.csv"
+st_write(nb_entropy_wide, file_path, row.names = FALSE)
+```
+
+# 2. Proximity Domain Indicators
+```{r packages}
+# load packages
+library(data.table)
+library(doParallel)
+library(cppRouting)
+library(RcppParallel)
+library(concaveman)
+```
+
+
+## 2.1. Origin Points - Centroid of Neighbourhoods
+```{r}
+# extract centroids of each neighbourhood
+nb_centroids <- nb_polygon %>% st_centroid()
+
+# save data
+file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/origin_coords_450.geojson"
+
+st_write(nb_centroids, file_path, driver = 'GeoJSON')
+```
+
+## 2.2. Destination Points - Creating polygons of each urban service
+```{r}
+# if there are more than 4 points, we create polygons and take the centroid as center of mass 
+diversity_poly <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count >= 4)
+  
+
+# this does not satisfy 4 points to form a polygon - we need to use the mean coordinates
+diversity_centroid <- diversity %>% select(-amenity) %>%
+  group_by(nb_clus, X15minute_6_urban_service) %>%
+  summarise(count = sum(counted)) %>%
+  filter(count < 4)
+```
+
+### 2.2.1. Center of mass
+#### 2.2.1.1. Centre of mass from 1, 2, 3 points
+If there is only 1, 2 or 3 amenities in the neighbourhoods,
+these points cannot form polygons. That's why the centre of mass is calculated separately.
+```{r center of mass for non-polygons}
+cm_1 <- diversity_centroid %>% 
+  filter(count == 1) %>% select(-count)
+
+cm_2 <- diversity_centroid %>%
+  filter(count == 2) %>% st_centroid(geometry) %>% select(-count)
+
+cm_3 <- diversity_centroid %>%
+  filter(count == 3) %>% st_centroid(geometry) %>% select(-count)
+```
+
+
+#### 2.2.1.2. center of mass from polygons
+If we take the centroids of polygons, we can get the center of mass. This can account for general distribution of amenities
+```{r}
+# create polygons out of multipoints
+polygons <- diversity_poly %>%
+  mutate(polygon = st_convex_hull(geometry)) %>% 
+  # take out the center of mass - centroid
+  mutate(centroid = st_centroid(polygon))
+
+# drop original geometry
+cm_4 <- polygons %>%
+  select(c(1,2,6)) %>% st_drop_geometry()
+
+# make it as a sf object, centroid as geometry
+cm_4 <- cm_4 %>%
+  st_as_sf()
+
+cm_4 <- cm_4 %>% st_set_geometry("centroid") %>% rename(geometry = centroid)
+  
+# rbind
+cm_list <- list(cm_1, cm_2, cm_3, cm_4)
+dest_coords <- do.call(rbind, cm_list) 
+dest_coords <- dest_coords %>%
+  group_by(nb_clus, X15minute_6_urban_service)
+  
+
+# destination points coordinates - coordinates indicate the center of mass for each urban service within neighbourhoods
+dest_coords <- dest_coords %>% arrange(nb_clus)
+
+file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/dest_coords_450.geojson"
+
+st_write(dest_coords, file_path, driver = 'GeoJSON')
+```
+All origin and destination points are in the same CRS:27700
+
+
+## 2.3. Average Euclidean Distance calculation
+The average Euclidean distance is calculated here.
+Origin point is the centroid of neighbourhoods 
+Destination point is the center of mass for each urban service within the neighbourhoods.
+
+This approache captures the average distance from the neighborhood centre to the urban service-related amenities as a whole.
+Whilst each neighbourhood consists of uber 3 hexagons, the distances from each hexagon within the neighborhood to the destination point will eventually average to the distance from the center of the neighborhood, it is reasonable to use the center of the neighborhood as a representative origin point for this calculation.
+
+By using center of mass as destination, we can effectively consider the overall distribution of urban services and take into account their collective proximity to the center of neighbourhoods.
+
+```{r proximity calculation}
+# Create an empty vector to store the distances
+distances <- vector("numeric", nrow(dest_coords))
+
+# Iterate over the rows of the destination data
+for (i in 1:nrow(dest_coords)) {
+  # Get the nb_clus value for the current destination point
+  nb_clus <- dest_coords$nb_clus[i]
+  
+  # Find the matching origin point based on nb_clus
+  origin <- nb_centroids[nb_centroids$nb_clus == nb_clus, ]
+  
+  # Calculate the Euclidean distance between the origin and destination points
+  distance <- st_distance(origin, dest_coords[i, ])
+  
+  # Store the distance in the vector
+  distances[i] <- distance
+}
+
+# Add the distances as a new column to the destination sf object
+# distance here indicates the distance between the centroid of neighbourhoods to
+# center of mass of urban services within neighbourhoods
+dest_coords$distance <- distances
+
+# max?
+max(dest_coords$distance) # 1657
+
+# min?
+min(dest_coords$distance) # 1.763
+
+```
+
+
+```{r save data}
+# save data
+proximity <- dest_coords %>% st_drop_geometry()
+
+proximity_wide <- proximity %>%
+  pivot_wider(names_from = X15minute_6_urban_service, 
+              values_from = distance, names_prefix = "") %>%
+  rename(p_c = Commerce, p_l = Living, p_edu = Education,
+         p_enter = Entertainment, p_h = Healthcare)
+
+
+# As there are NA values, an additional column has been created. remove it
+proximity_wide <- proximity_wide %>% select(-Other)
+```
+
+
+## 2.4. Network Construction
+For those neighbourhoods which miss any of the five urban services, the network distance to the closest center of mass for that missing urban service in neighbouring neighbourhoods will be calculated.
+
+```{r}
+edges <- st_read('C:/Users/phily/Liveability-Index/data/network/sf_all_london.gpkg', layer = "edges") %>% st_transform(., 27700)
+
+# create unique edge identifier
+edges <- edges %>% dplyr::select(from, to, highway, length, geom) %>% dplyr::mutate(edgeID = c(1:n())) %>%
+  dplyr::select(edgeID, from, to, highway, length, geom)
+
+
+# create nodes at the start and end point of each edge
+# give each node a unique index
+nodes <- edges %>% 
+  st_coordinates() %>%
+  as_tibble() %>%
+  dplyr::rename(edgeID = L1) %>%
+  group_by(edgeID) %>%
+  slice(c(1,n())) %>%
+  ungroup() %>%
+  dplyr::mutate(start_end = rep(c('start', 'end'), times = n()/2)) %>%
+  dplyr::mutate(xy = paste(.$X, .$Y)) %>%
+  
+  # by using factor(), we can see many unique point geometry
+  # based on this, we give node indices
+  dplyr::mutate(nodeID = group_indices(., factor(xy, levels = unique(xy)))) %>%
+  dplyr::select(-xy)
+
+
+# start, end points for each edge
+# pull out start nodes
+start_nodes <- nodes %>% 
+  filter(start_end == 'start') %>%
+  pull(nodeID)
+
+# pull out end nodes
+end_nodes <- nodes %>%
+  filter(start_end == 'end') %>%
+  pull(nodeID)
+
+# plug in start/end nodes and reorder columns
+edges <- edges %>% select(-c(from, to)) %>%
+  mutate(from = start_nodes, to = end_nodes) %>%
+  select(from, to, highway, length, edgeID, geom)
+
+# remove end_nodes and start_nodes to save memory usage
+rm(end_nodes)
+rm(start_nodes)
+
+# remove duplicate nodes & set the same crs (EPSG:27700)
+nodes <- nodes %>% 
+  # keep unique node ID
+  distinct(nodeID, .keep_all = TRUE) %>%
+  dplyr::select(-c(edgeID, start_end)) 
+```
+
+
+```{r create network}
+# set the number of threads used by cppRouting
+RcppParallel::setThreadOptions(numThreads = 1)
+
+# prepare data to an appropriate format
+roads <- edges %>% select(from, to, length) %>% st_drop_geometry() %>% as.data.table()
+
+coord <- nodes %>% select(nodeID, X, Y) %>% as.data.table()
+
+# instantiate a graph with coordinates
+
+graph  <-  roads %>% 
+  makegraph(directed = F,
+            coords = coord)
+
+# remove edges and nodes to save memory
+rm(edges)
+rm(nodes)
+rm(coord)
+rm(roads)
+```
+
+
+```{r simplify graph}
+# remove non-intersection nodes, duplicated edges and isolated loops - simplify graph
+graph <- graph %>%
+  cppRouting::cpp_simplify(rm_loop = T,
+                           iterate = F)
+
+```
+
+
+```{r finding nearest node on the graph function}
+# this function finds the nearest nodes on the graph
+find_nearest_nodes_on_graph_sf <- function(point_data, graph, crs = 27700) {
+  
+  nodes_on_graph <- graph$coords %>% st_as_sf(., 
+                                              coords = c('X', 'Y'),
+                                              crs = 27700) 
+  
+  poi_data <- point_data %>% st_transform(27700)
+  
+  graph$coords[st_nearest_feature(poi_data, nodes_on_graph),'nodeID']
+  
+  
+}
+```
+
+## 2.5. Network Distance
+### 2.5.1. p_edu calculation using network distance
+The proximity to urban services of the neighbourhoods which miss any of five urban services will be measured between the center of neighbourhoods to the closest center of mass in other neighbourhoods
+```{r calculate distance for those neighbourhoods with missing education services}
+# P_edu - Education
+# pull out the nb_clus which has education services - they will be destination points 396 neighbourhoods
+edu_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_edu)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+edu_dest <- dest_coords %>% 
+  filter(nb_clus %in% edu_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Education') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have education 
+edu_nb_clus <- proximity_wide %>% filter(is.na(p_edu)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+edu_ori <- nb_centroids %>% 
+  filter(nb_clus %in% edu_nb_clus) %>% st_as_sf()
+
+```
+
+
+This projects the nodes on the graph and finds the closest corresponding nodes on the graph
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(edu_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(edu_dest, graph, crs = 27700)
+```
+
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel from each node
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+edu_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+edu_ori_1 <- edu_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# embed this distance value to original proximity_wide dataframe
+edu_ori_test <- edu_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  edu_ori_test,
+                  by = 'nb_clus')
+
+test$p_edu <- ifelse(is.na(test$p_edu), test$mindist, test$p_edu)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+```
+
+
+
+### 2.5.2. p_l calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_l - Living
+# pull out the nb_clus which has living facilities - 399 destinations
+living_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_l)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_dest <- dest_coords %>% 
+  filter(nb_clus %in% living_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Living') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have living facilities - 0 origin 
+living_nb_clus <- proximity_wide %>% filter(is.na(p_l)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+living_ori <- nb_centroids %>% 
+  filter(nb_clus %in% living_nb_clus) %>% st_as_sf()
+
+
+```
+
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(living_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(living_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+living_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+living_ori_1 <- living_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+living_ori_test <- living_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  living_ori_test,
+                  by = 'nb_clus')
+
+test$p_l <- ifelse(is.na(test$p_l), test$mindist, test$p_l)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_l))
+```
+
+
+
+### 2.5.3. p_c calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_c - Commerce
+# pull out the nb_clus which has commerce - 396 facilities
+com_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_c)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_dest <- dest_coords %>% 
+  filter(nb_clus %in% com_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Commerce') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have commerce - 3 origin 
+com_nb_clus <- proximity_wide %>% filter(is.na(p_c)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+com_ori <- nb_centroids %>% 
+  filter(nb_clus %in% com_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_c)) # 3
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(com_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(com_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining edu_ori nb_clus to nodeID
+com_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+com_ori_1 <- com_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+com_ori_test <- com_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  com_ori_test,
+                  by = 'nb_clus')
+
+test$p_c <- ifelse(is.na(test$p_c), test$mindist, test$p_c)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_c))
+```
+
+
+
+### 2.5.4. p_enter calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_enter - Entertainment
+# pull out the nb_clus which has entertainment - 397
+enter_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_enter)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_dest <- dest_coords %>% 
+  filter(nb_clus %in% enter_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Entertainment') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have entertainment - 2
+enter_nb_clus <- proximity_wide %>% filter(is.na(p_enter)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+enter_ori <- nb_centroids %>% 
+  filter(nb_clus %in% enter_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_enter)) # 2
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(enter_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(enter_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+enter_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+enter_ori_1 <- enter_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# imbed this distance value to original proximity_wide dataframe
+enter_ori_test <- enter_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  enter_ori_test,
+                  by = 'nb_clus')
+
+test$p_enter <- ifelse(is.na(test$p_enter), test$mindist, test$p_enter)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_enter))
+```
+
+
+
+### 2.5.5. p_h calculation using network distance
+```{r calculate distance for those neighbourhoods with missing urban services}
+# P_h - Healthcare
+# pull out the nb_clus which has health - 384
+health_dest_nb_clus <- proximity_wide %>% filter(!is.na(p_h)) %>% pull(nb_clus)
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_dest <- dest_coords %>% 
+  filter(nb_clus %in% health_dest_nb_clus) %>% st_as_sf() %>% 
+  filter(X15minute_6_urban_service == 'Healthcare') #%>% st_cast('POINT')
+
+# pull the nb_clus which does not have health - 15
+health_nb_clus <- proximity_wide %>% filter(is.na(p_h)) %>% pull(nb_clus) 
+
+# Filter the nb_centroids data frame using the extracted nb_clus values
+health_ori <- nb_centroids %>% 
+  filter(nb_clus %in% health_nb_clus) %>% st_as_sf()
+
+sum(is.na(proximity_wide$p_h)) # 15
+```
+
+```{r find closest nodes in the graph}
+nearest_nodes_origin <- find_nearest_nodes_on_graph_sf(health_ori, graph, crs = 27700)
+nearest_nodes_dest <- find_nearest_nodes_on_graph_sf(health_dest, graph, crs = 27700)
+```
+
+
+```{r calculate distance using the cppRouting package}
+dist <- get_distance_matrix(graph,
+                            from = nearest_nodes_origin$nodeID,
+                            to = nearest_nodes_dest$nodeID)
+
+# extract minimum travel
+dist2<-data.frame(node=nearest_nodes_origin$nodeID,mindist=apply(dist,1,min,na.rm=T))
+
+# joining enter_ori nb_clus to nodeID
+health_ori$nodeID <- nearest_nodes_origin %>% pull(nodeID)
+health_ori_1 <- health_ori %>% left_join(.,
+                                 dist2,
+                                 by = c('nodeID' = 'node')) 
+
+
+# embed this distance value to original proximity_wide dataframe
+health_ori_test <- health_ori_1 %>% st_drop_geometry() %>% select(nb_clus, mindist)
+test <- left_join(proximity_wide,
+                  health_ori_test,
+                  by = 'nb_clus')
+
+test$p_h <- ifelse(is.na(test$p_h), test$mindist, test$p_h)
+# Drop the mindist column, as it is no longer needed
+proximity_wide <- test %>% select(-mindist)
+
+sum(is.na(proximity_wide$p_h)) #0
+
+max(proximity_wide$p_edu) # 2635
+max(proximity_wide$p_c) # 3414
+max(proximity_wide$p_l) # 874
+max(proximity_wide$p_enter) # 2253
+max(proximity_wide$p_h) # 3070
+```
+
+
+
+```{r data save}
+file_path = "C:/Users/phily/Liveability-Index/data/domain data/proximity/proximity_indicator_nb_450.csv"
+
+write.csv(proximity_wide, file_path, row.names = FALSE)
+```
+
+
+# 3. Population Density Indicator
+```{r}
+# read in hexagon population data
+hex_pop <- st_read('C:/Users/phily/Liveability-Index/data/domain data/pop/hexagon_pop.geojson') %>% st_transform(27700)
+```
+
+
+```{r cumulative population at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_pop$hex_area <- st_area(hex_pop)
+
+# Perform spatial intersection
+intersection <- st_intersection(hex_pop, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_population <- intersection$weighted_avg_pop * intersection$area_proportion
+
+intersection <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(populations = sum(estimated_population)) 
+
+
+# calculate area size
+intersection <- intersection %>% mutate(area = st_area(.))
+
+# Calculate population density per square kilometer
+intersection <- intersection %>%
+  mutate(pop_density = populations / (area / 1000000))
+                                      
+max(intersection$pop_density)
+min(intersection$pop_density)
+
+# select columns
+intersection <- intersection %>% st_drop_geometry()
+intersection <- intersection %>% select(c(1,4))
+
+# save data - just those with populations
+file_path = 'C:/Users/phily/Liveability-Index/data/domain data/pop/pop_density_nb_450.csv'
+
+st_write(intersection, file_path)
+```
+
+# 4. Data Consolidation
+```{r merge data}
+# merge diversity and proximity indicators
+div_prox_450 <- nb_entropy_wide %>% left_join(.,
+                                            proximity_wide,
+                                            by = 'nb_clus')
+
+final_450 <- div_prox_450 %>% left_join(.,
+                                        intersection,
+                                        by = 'nb_clus')
+
+# save data
+file_path = 'C:/Users/phily/Liveability-Index/data/domain data/raw_domain_indicator_nb_450.csv'
+write.csv(final_450, file_path, row.names = FALSE)
+```
+
+# 5. Normalisation and Aggregation
+```{r}
+# read in data
+df <- read.csv('C:/Users/phily/Liveability-Index/data/domain data/final_domain_indicator_nb_450.csv')
+
+diversity <- df[1:6]
+proximity <- df[c(1, 7:11)]
+pop_density <- df[c(1, 12)]
+
+gc()
+```
+
+## 5.1. Diversity Domain
+### 5.1.1. Custom Functions for Diversity Domain
+```{r functions for diversity}
+# exponential transformation function
+# The higher the value is, the higher transformed value it gets.
+# As higher value indicates the better diversity of neighbourhood
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var)
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+
+### 5.1.2. Diversity Domain Normalisation
+```{r diversity}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# diversity domain score
+diversity <- diversity %>%
+  mutate(diversity_score = (d_c_exp / 5) + (d_edu_exp / 5) +
+           (d_enter_exp / 5) + (d_l_exp / 5) + (d_h_exp / 5))
+
+# Overall diversity exponential transformation
+diversity['diversity_exp'] <- rank_exp(diversity, diversity_score)
+
+# final diversity data
+diversity_final <- diversity %>% select(nb_clus, d_c_exp, d_edu_exp,
+                                        d_enter_exp, d_l_exp,
+                                        d_h_exp, diversity_score,
+                                        diversity_exp)
+```
+
+## 5.2. Proximity Domain
+### 5.2.1. Custom Functions for Proximity Domain
+```{r}
+# exponential transformation function
+# Unlike diversity, the shorter the distance is, the better the proximity is.
+# So, we have to modify the previous function.
+# We have to reverse the rank as this is opposite of diversity
+# Exponential transformation function
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# Function to rank and exponentially transform a variable in a given table
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+### 5.2.2. Proximity Domain Normalisation
+```{r proximity }
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# proximity score
+proximity <- proximity %>%
+  mutate(proximity_score = (p_c_exp / 5) + (p_edu_exp / 5) +
+           (p_enter_exp / 5) + (p_l_exp / 5) + (p_h_exp / 5))
+
+# Overall proximity exponential transformation
+# Attention: When calculating overall proximity exponential transformation,
+# the higher proximity score, which is combined by 5 proximity subindicators, should receive a higher rank
+# which is different from calculating the proximity subindicators where we gave the lower distance a higher # exponential rank.
+# So, here we use the original 'rank_exp' function to credit those neighbourhoods with high proximity score with higher ranks.
+# If we use the function (rank_exp_proximity) used for calculating proximity subindicators, we will commit an error of giving high proximity scores a lower rank.
+proximity['proximity_exp'] <- rank_exp(proximity, proximity_score)
+
+# final proximity data
+proximity_final <- proximity %>% select(nb_clus, p_c_exp, p_edu_exp,
+                                        p_enter_exp, p_l_exp,
+                                        p_h_exp, proximity_score,
+                                        proximity_exp)
+```
+
+
+## 5.3. Population Density
+```{r}
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+
+pop_density_final <- pop_density %>% select(nb_clus,
+                                            pop_density_exp)
+```
+
+## 5.4. Final Index
+```{r}
+# left join diversity and proximity domain
+li_d_p <- diversity_final %>%
+  left_join(proximity_final,
+            by = 'nb_clus')
+
+# left join previous data with population density domain
+li_d_p_pop <- li_d_p %>%
+  left_join(pop_density_final,
+            by = 'nb_clus')
+
+# liveability index - combine three domains
+li <- li_d_p_pop %>%
+  mutate(li_score = (diversity_exp / 3) + (proximity_exp / 3) + 
+           (pop_density_exp / 3))
+
+# calculate the total score
+li['li_exp'] <- rank_exp(li, li_score)
+
+# calculate decile
+li_final <- li %>% mutate(li_rank = min_rank(li_score),
+                          li_decile = ntile(li_score, 10))
+
+file_path = 'C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv'
+
+write.csv(li_final, file_path, row.names = FALSE)
+```
+
+# 6. Uncertainty Test
+```{r packages}
+library(tmap)
+library(tmaptools)
+```
+## 6.1. Prerequisites
+### 6.1.1. Customised functions
+```{r custom functions}
+# exponential transformation
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var) # https://public-bigdata.tistory.com/48
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+
+
+# proximity 
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+
+
+# minmax scalar
+minmax <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var) 
+  
+  data %>% 
+    mutate(mm = ((!!var- min(!!var)) /(max(!!var)-min(!!var)))) %>%
+    select(mm)
+}
+
+
+minmax_proximity <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var) 
+  
+  data %>% 
+    mutate(mm = (1- ((!!var- min(!!var)) /(max(!!var)-min(!!var))))) %>%
+    select(mm)
+}
+
+
+# Z-score standardisation
+ss <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(ss = ((!!var - mean(!!var, na.rm = na.rm)) / sd(!!var, na.rm = na.rm))) %>%
+    select(ss)
+}
+
+ss_proximity <- function(df, var, na.rm = TRUE) {
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(ss = -((!!var - mean(!!var, na.rm = na.rm)) / sd(!!var, na.rm = na.rm))) %>%
+    select(ss)
+}
+
+
+# Robust normalisation
+robust <- function(df, var, na.rm = T){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(rs = (!!var - median(!!var, na.rm= TRUE)) / IQR(!!var, na.rm = TRUE)) %>%
+    select(rs)
+}
+
+robust_proximity <- function(df, var, na.rm = T){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  data %>%
+    mutate(rs = -((!!var - median(!!var, na.rm= TRUE)) / IQR(!!var, na.rm = TRUE))) %>%
+    select(rs)
+}
+
+```
+
+### 6.1.2. Lists to use in a loop
+```{r}
+# Exclusion of subindicators
+## weights given, when one of subindicators is excluded
+diversity_weights <- list('1' = c(0.2, 0.2, 0.2, 0.2, 0.2),
+                          '2' = c(0, 0.25, 0.25, 0.25, 0.25),
+                          '3' = c(0.25, 0, 0.25, 0.25, 0.25),
+                          '4' = c(0.25, 0.25, 0, 0.25, 0.25),
+                          '5' = c(0.25, 0.25, 0.25, 0, 0.25),
+                          '6' = c(0.25, 0.25, 0.25, 0.25, 0))
+
+proximity_weights <- list('1' = c(0.2, 0.2, 0.2, 0.2, 0.2),
+                          '2' = c(0, 0.25, 0.25, 0.25, 0.25),
+                          '3' = c(0.25, 0, 0.25, 0.25, 0.25),
+                          '4' = c(0.25, 0.25, 0, 0.25, 0.25),
+                          '5' = c(0.25, 0.25, 0.25, 0, 0.25),
+                          '6' = c(0.25, 0.25, 0.25, 0.25, 0))
+
+# When combining 3 domains, in case when population density is excluded
+pop_density_weights <- list('1' = c(1/3, 1/3, 1/3),
+                            '2' = c(0.5, 0.5, 0))
+
+# normalisation
+norm_weights <- list('1' = c(rank_exp, rank_exp_proximity),
+                     '2' = c(minmax, minmax_proximity),
+                     '3' = c(ss, ss_proximity),
+                     '4' = c(robust, robust_proximity))
+
+```
+
+
+## 6.2. Processing
+### 6.2.1. Rank Exponential Normalisation
+```{r 72 scenarios - rank_exp}
+ua_output_exp <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- df[1:6]
+  
+  # exponential transformation on each diversity subindicator
+  diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+  diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+  diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+  diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+  diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_exp * diversity_weights[[div_w]][1]) + 
+             (d_edu_exp * diversity_weights[[div_w]][2]) + 
+             (d_enter_exp * diversity_weights[[div_w]][3]) + 
+             (d_l_exp * diversity_weights[[div_w]][4]) + 
+             (d_h_exp * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_exp'] <- rank_exp(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_exp)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- df[c(1, 7:11)]
+    
+    # exponential transformation on each proximity indicator
+    proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+    proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+    proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+    proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+    proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_exp * proximity_weights[[prox_w]][1]) + 
+               (p_edu_exp * proximity_weights[[prox_w]][2]) + 
+               (p_enter_exp * proximity_weights[[prox_w]][3]) + 
+               (p_l_exp * proximity_weights[[prox_w]][4]) + 
+               (p_h_exp * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_exp'] <- rank_exp(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_exp)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- df[c(1, 12)]
+      
+      # exponential transformation on population density
+      pop_density['pop_den_exp'] <- rank_exp(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_exp * pop_density_weights[[pop_w]][1]) + 
+                 (prox_exp * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_exp * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_exp'] <- rank_exp(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_exp, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'rank_exp'
+      
+      ua_output_exp <- rbind(ua_output_exp, li_final)
+      
+      
+    }
+    
+  }
+}
+
+# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_rank_exp_450.csv'
+# write_csv(ua_output_exp, file_path)
+```
+
+
+### 6.2.2. MinMax Normalisation
+```{r 72 scenarios - minmax}
+ua_output_mm <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- df[1:6]
+  
+  # minmax normalisation on each diversity subindicator
+  diversity[,'d_c_mm'] <- minmax(diversity, d_c)
+  diversity[,'d_edu_mm'] <- minmax(diversity, d_edu)
+  diversity[,'d_enter_mm'] <- minmax(diversity, d_enter)
+  diversity[,'d_l_mm'] <- minmax(diversity, d_l)
+  diversity[,'d_h_mm'] <- minmax(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_mm * diversity_weights[[div_w]][1]) + 
+             (d_edu_mm * diversity_weights[[div_w]][2]) + 
+             (d_enter_mm * diversity_weights[[div_w]][3]) + 
+             (d_l_mm * diversity_weights[[div_w]][4]) + 
+             (d_h_mm * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_mm'] <- minmax(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_mm)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- df[c(1, 7:11)]
+    
+    # minmax normalisation on each proximity indicator
+    proximity[,'p_c_mm'] <- minmax_proximity(proximity, p_c)
+    proximity[,'p_edu_mm'] <- minmax_proximity(proximity, p_edu)
+    proximity[,'p_enter_mm'] <- minmax_proximity(proximity, p_enter)
+    proximity[,'p_l_mm'] <- minmax_proximity(proximity, p_l)
+    proximity[,'p_h_mm'] <- minmax_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_mm * proximity_weights[[prox_w]][1]) + 
+               (p_edu_mm * proximity_weights[[prox_w]][2]) + 
+               (p_enter_mm * proximity_weights[[prox_w]][3]) + 
+               (p_l_mm * proximity_weights[[prox_w]][4]) + 
+               (p_h_mm * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_mm'] <- minmax(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_mm)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- df[c(1, 12)]
+      
+      # minmax normalisation on population density
+      pop_density['pop_den_mm'] <- minmax(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_mm * pop_density_weights[[pop_w]][1]) + 
+                 (prox_mm * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_mm * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_mm'] <- minmax(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_mm, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'minmax'
+      
+      ua_output_mm <- rbind(ua_output_mm, li_final)
+      
+      
+    }
+    
+  }
+}
+
+# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_minmax_450.csv'
+# write_csv(ua_output_mm, file_path)
+```
+
+
+### 6.2.3. Standardisation
+```{r 72 scenarios - standardisation}
+ua_output_ss <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- df[1:6]
+  
+  # standardisation on each diversity subindicator
+  diversity[,'d_c_ss'] <- ss(diversity, d_c)
+  diversity[,'d_edu_ss'] <- ss(diversity, d_edu)
+  diversity[,'d_enter_ss'] <- ss(diversity, d_enter)
+  diversity[,'d_l_ss'] <- ss(diversity, d_l)
+  diversity[,'d_h_ss'] <- ss(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_ss * diversity_weights[[div_w]][1]) + 
+             (d_edu_ss * diversity_weights[[div_w]][2]) + 
+             (d_enter_ss * diversity_weights[[div_w]][3]) + 
+             (d_l_ss * diversity_weights[[div_w]][4]) + 
+             (d_h_ss * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_ss'] <- ss(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_ss)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- df[c(1, 7:11)]
+    
+    # standardisation on each proximity indicator
+    proximity[,'p_c_ss'] <- ss_proximity(proximity, p_c)
+    proximity[,'p_edu_ss'] <- ss_proximity(proximity, p_edu)
+    proximity[,'p_enter_ss'] <- ss_proximity(proximity, p_enter)
+    proximity[,'p_l_ss'] <- ss_proximity(proximity, p_l)
+    proximity[,'p_h_ss'] <- ss_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_ss * proximity_weights[[prox_w]][1]) + 
+               (p_edu_ss * proximity_weights[[prox_w]][2]) + 
+               (p_enter_ss * proximity_weights[[prox_w]][3]) + 
+               (p_l_ss * proximity_weights[[prox_w]][4]) + 
+               (p_h_ss * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_ss'] <- ss(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_ss)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- df[c(1, 12)]
+      
+      # standardisation on population density
+      pop_density['pop_den_ss'] <- ss(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_ss * pop_density_weights[[pop_w]][1]) + 
+                 (prox_ss * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_ss * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_ss'] <- ss(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_ss, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'ss'
+      
+      ua_output_ss <- rbind(ua_output_ss, li_final)
+      
+      
+    }
+    
+  }
+}
+
+# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_ss_450.csv'
+# write_csv(ua_output_ss, file_path)
+```
+
+
+### 6.2.4. Robust normalisation
+```{r 72 scenarios - robust normalisation}
+ua_output_rs <- tibble()
+
+# run for loop - creates 72 versions of LCI and store results for each neighbourhood
+
+for (div_w in seq(1, length(diversity_weights))) {
+  
+  # diversity subindicators
+  diversity <- df[1:6]
+  
+  # robust normalisation on each diversity subindicator
+  diversity[,'d_c_rs'] <- robust(diversity, d_c)
+  diversity[,'d_edu_rs'] <- robust(diversity, d_edu)
+  diversity[,'d_enter_rs'] <- robust(diversity, d_enter)
+  diversity[,'d_l_rs'] <- robust(diversity, d_l)
+  diversity[,'d_h_rs'] <- robust(diversity, d_h)
+  
+  # diversity domain score
+  div_weight <- diversity %>%
+    mutate(div_score = (d_c_rs * diversity_weights[[div_w]][1]) + 
+             (d_edu_rs * diversity_weights[[div_w]][2]) + 
+             (d_enter_rs * diversity_weights[[div_w]][3]) + 
+             (d_l_rs * diversity_weights[[div_w]][4]) + 
+             (d_h_rs * diversity_weights[[div_w]][5]))
+  
+  # diversity final weighting
+  div_weight['div_rs'] <- robust(div_weight, div_score)
+  div_fin <- select(div_weight, nb_clus, div_rs)
+  
+  
+  
+  for (prox_w in seq(1, length(proximity_weights))) {
+    
+    # proximity subindicator
+    proximity <- df[c(1, 7:11)]
+    
+    # robust normalisation on each proximity indicator
+    proximity[,'p_c_rs'] <- robust_proximity(proximity, p_c)
+    proximity[,'p_edu_rs'] <- robust_proximity(proximity, p_edu)
+    proximity[,'p_enter_rs'] <- robust_proximity(proximity, p_enter)
+    proximity[,'p_l_rs'] <- robust_proximity(proximity, p_l)
+    proximity[,'p_h_rs'] <- robust_proximity(proximity, p_h)
+    
+    # proximity domain score
+    prox_weight <- proximity %>%
+      mutate(prox_score = (p_c_rs * proximity_weights[[prox_w]][1]) + 
+               (p_edu_rs * proximity_weights[[prox_w]][2]) + 
+               (p_enter_rs * proximity_weights[[prox_w]][3]) + 
+               (p_l_rs * proximity_weights[[prox_w]][4]) + 
+               (p_h_rs * proximity_weights[[prox_w]][5]))
+    
+    # proximity final weighting
+    prox_weight['prox_rs'] <- robust(prox_weight, prox_score)
+    prox_fin <- select(prox_weight, nb_clus, prox_rs)
+    
+    
+    
+    for (pop_w in seq(1, length(pop_density_weights))) {
+      
+      # population density
+      pop_density <- df[c(1, 12)]
+      
+      # standardisation on population density
+      pop_density['pop_den_rs'] <- robust(pop_density, pop_density)
+      
+      
+      # combine three domains
+      div_prox <- left_join(div_fin,
+                            prox_fin,
+                            by = 'nb_clus')
+      
+      div_prox_pop <- left_join(div_prox,
+                                pop_density,
+                                by = 'nb_clus')
+      
+      # final score
+      li_weight <- div_prox_pop %>% 
+        mutate(li_score = (div_rs * pop_density_weights[[pop_w]][1]) + 
+                 (prox_rs * pop_density_weights[[pop_w]][2]) + 
+                 (pop_den_rs * pop_density_weights[[pop_w]][3]))
+      
+      # liveability score final weighting
+      li_weight['li_rs'] <- robust(li_weight, li_score)
+      
+      # rank and decile
+      li_weight <- li_weight %>% mutate(li_rank = min_rank(li_score),
+                                      li_decile = ntile(li_score, 10))
+      
+      # print current iteration
+      print(paste('div_w: ', div_w, ' prox_w: ', prox_w, 'pop_w: ', pop_w))
+      
+      # create a final output table
+      li_final <- select(li_weight, nb_clus, li_score, li_rs, li_rank, li_decile)
+      
+      # add variable fields
+      li_final$diversity_weight <- div_w
+      li_final$proximity_weight <- prox_w
+      li_final$pop_density_weight <- pop_w
+      li_final$normalisation <- 'rs'
+      
+      ua_output_rs <- rbind(ua_output_rs, li_final)
+      
+      
+    }
+    
+  }
+}
+
+# file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_robust_450.csv'
+# write_csv(ua_output_rs, file_path)
+```
+
+### 6.2.5. Bind all scenarios
+```{r}
+# Assuming column names are consistent, adjust the data frames as needed
+ua_output_exp <- rename(ua_output_exp, li_norm_score = li_exp)
+ua_output_mm <- rename(ua_output_mm, li_norm_score = li_mm)
+ua_output_rs <- rename(ua_output_rs, li_norm_score = li_rs)
+ua_output_ss <- rename(ua_output_ss, li_norm_score = li_ss)
+
+# Then combine them using rbind
+ua_output <- rbind(ua_output_exp, ua_output_mm, ua_output_rs, ua_output_ss)
+
+file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_data_final_450.csv'
+write.csv(ua_output, file_path)
+```
+
+
+
+## 6.3. Summary statistics for UA outputs
+### 6.3.1. Reference ranking
+```{r reference ranking}
+# draw out baseline
+baseline <- ua_output %>%
+  filter(diversity_weight == 1, 
+         proximity_weight == 1,
+         pop_density_weight == 1,
+         normalisation == 'rank_exp') %>%
+  select(nb_clus, li_rank_b = li_rank)
+
+# save reference ranking to csv for use in sensitivity analysis
+write_csv(baseline, 'C:/Users/phily/Liveability-Index/data/uncertainty test/li_reference_rank_450.csv')
+```
+
+### 6.3.2. Summary stats
+```{r}
+# left join reference to full table, so we can work out each iterations score compared to the reference
+ua_final <- ua_output %>%
+  left_join(baseline, by = 'nb_clus') %>%
+  mutate(li_rank_change = abs(li_rank - li_rank_b),
+         rank_change_perc = li_rank_change / 399)
+
+# save data
+write_csv(ua_final, 'C:/Users/phily/Liveability-Index/data/uncertainty test/ua_all_tests_rank_change_450.csv')
+```
+
+
+## 6.4. Distribution of SD in mean neighbourhood ranking across different factor values
+
+### 6.4.1. Assign neighbourhoods to London Boroughs
+The code below assigns each neighbourhood to boroughs it intersects with the most using spatial intersection. The neighbourhoods are constructed from the agglomeration of amenities, so they do not necessarily align with administrative boundary. Thus, some neighbourhoods overlap with multiple boroughs.
+
+This procedure has been taken for the ease of interpretation and visualisation. This way, you can approximate the neighbourhoods' aggregation to boroughs.
+```{r}
+# read in london neighbourhood sf
+nb_polygon
+
+# London Boroughs
+borough_sf <- st_read('C:/Users/phily/Liveability-Index/data/boundary/boros/London_Borough_Excluding_MHW.shp') %>% st_transform(27700)
+
+# Step 1: Perform spatial intersection
+intersection <- st_intersection(nb_polygon, borough_sf) # 719 observations
+
+# Step 2: Determine the borough with the largest intersection area for each neighborhood
+nb_polygon$LAD <- sapply(1:nrow(nb_polygon), function(i) {
+  
+  intersected_boroughs <- intersection$NAME[intersection$nb_clus == nb_polygon$nb_clus[i]]
+  
+  if (length(intersected_boroughs) > 0) {
+    # Get the borough with the largest intersection area
+    borough_with_max_area <- intersected_boroughs[which.max(intersection$geom[intersection$nb_clus == nb_polygon$nb_clus[i]] %>% st_area())]
+    
+    return(borough_with_max_area)
+  } else {
+    # Handle neighborhoods that do not intersect with any borough
+    return(NA)
+  }
+})
+
+# check whether there is any neighbourhood that is not assigned of boroughs
+sum(is.na(nb_polygon$assigned_borough)) # all neighbourhoods have been assigned to boroughs
+```
+
+### 6.4.2. Data Join
+```{r}
+neighbourhood_lon <- nb_polygon %>% st_set_geometry(NULL)
+
+# join to get LAD field and create unique test identifier to group by
+results <- ua_output %>% 
+  left_join(neighbourhood_lon, by = 'nb_clus') %>% 
+  unite(test, c('normalisation', 'diversity_weight', 
+                'proximity_weight', 'pop_density_weight'), 
+        remove = FALSE)
+
+# How many scenarios? 288 (6 * 6 * 2 * 4)
+nrow(distinct(results, test))
+
+```
+
+
+```{r SD in mean rank of neighbourhoods}
+# for each test factor calculate mean rank for each neighbourhood then deviation in mean rank across each test
+
+dev_normalisation <- results %>% 
+  group_by(nb_clus, normalisation) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 399, test = 'normalisation')
+
+dev_diversity <- results %>% 
+  group_by(nb_clus, diversity_weight) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 399, test = 'diversity_weight')
+
+dev_proximity <- results %>% 
+  group_by(nb_clus, proximity_weight) %>% 
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 399, test = 'proximity_weight')
+
+dev_pop_density <- results %>%
+  group_by(nb_clus, pop_density_weight) %>%
+  summarise(mean_rank = mean(li_rank)) %>%
+  group_by(nb_clus) %>%
+  summarise(rank_dev = sd(mean_rank) / 399, test = 'pop_density_weight')
+
+
+# bind all tables together - 1596 rows
+dev_all <- bind_rows(dev_normalisation, dev_diversity, dev_proximity, dev_pop_density)
+
+# check
+head(dev_all)
+
+# check we have 399 records for each test
+dev_all %>% group_by(test) %>% dplyr::summarise(count = n())
+
+# save data
+write_csv(dev_all, 'C:/Users/phily/Liveability-Index/data/uncertainty test/rank_dev_all_450.csv')
+```
+
+## 6.5. Plots 
+### 6.5.1. Neighbourhood deviation in mean rank across factor values Plot
+```{r}
+# Custom names for x-axis labels
+custom_names <- c("Normalisation Factor", "Population Density Factor", "Proximity Factor", "Diversity Factor")
+
+# Create a custom label function
+custom_label_function <- function(variable, value) {
+  return(custom_names[value])
+}
+
+# Calculate median rank for each test factor
+median_rank <- dev_all %>%
+  group_by(test) %>%
+  summarise(median_rank = median(rank_dev))
+
+# Reorder levels of the test factor based on median rank
+dev_all$test <- factor(dev_all$test, levels = median_rank$test[order(median_rank$median_rank, decreasing = TRUE)])
+
+# Plot with customized x-axis labels
+myplot2 <- ggplot(dev_all, aes(x = test, y = rank_dev, fill = test)) +
+  geom_boxplot(fill = 'lightskyblue2', alpha = 0.3) +
+  xlab("") +
+  ylab("Standard Deviation of Mean Rank") +
+  ggtitle("Comparison of Uncertainty for Different Test Factors") +
+  facet_wrap(~ test, scales = "free_x", nrow = 1, labeller = labeller(test = custom_label_function)) +
+  theme(axis.text.x = element_blank(),        # Remove x-axis labels
+        axis.ticks.x = element_blank(),       # Remove x-axis ticks
+        strip.text.x = element_text(face = "bold"),  # Keep facet labels bold
+        axis.text.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", size =20, hjust = 0.5),  # Center the main title
+        strip.background = element_blank(),    # Remove the background of facet labels
+        legend.position = 'none')             # Remove the legend
+
+myplot2
+ggsave('C:/Users/phily/Liveability-Index/output/uncertainty test/sd_mean_rank_450.png', plot = myplot2, width = 10, height = 8, dpi = 300)
+```
+
+
+
+
+
+### 6.5.2. LAD Rankings for all simulations
+```{r}
+# Step 1: By grouping neighbourhoods by boroughs and test, we can calculate the aggregated average li_score for each borough
+mean_scores_by_test <- results %>%
+  group_by(LAD, test) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 33, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+```
+
+
+```{r overall LI Rank}
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests$LAD <- factor(
+  lad_rank_for_288_tests$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+# Create the box plot for each borough with individual points
+myplot1<- ggplot(lad_rank_for_288_tests, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(width = 0.2, size = 0.4, alpha = 0.3, color = "dodgerblue1") +
+  labs(x = "Local Area District (LAD)", y = "Rank") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +  # Set the theme to a white background with black axes and grid lines
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5 , family = 'sans', margin = margin(b = 20))) 
+# Rotate x-axis labels for better readability
+
+myplot1
+
+ggsave('C:/Users/phily/Liveability-Index/output/uncertainty test/ua_rank_simulation_450.png', plot = myplot1, width = 12, height = 12, dpi = 300)
+```
+
+### 6.5.3. LAD Rankings by normalisation factor
+```{r plot ranking by normalisation factor}
+mean_scores_by_test <- results %>%
+  group_by(LAD, test, normalisation) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 32, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests_norm <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+
+
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests_norm %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests_norm$LAD <- factor(
+  lad_rank_for_288_tests_norm$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+my_colors <- c("minmax" = "firebrick2", "rank_exp" = "purple4", "ss" = "darkgoldenrod1", "rs" = "mediumseagreen")
+
+myplot2 <- ggplot(lad_rank_for_288_tests_norm, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(aes(color = normalisation), width = 0.2, size = 0.4, alpha = 0.3) +
+  labs(x = "Local Area District (LAD)", y = "Rank", color = "Normalisation") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5, family = 'sans', margin = margin(b = 20))) +
+  scale_color_manual(values = my_colors, labels = c('minmax' = 'MinMax normalisation',
+                                                    'rank_exp' = 'Rank Exponential',
+                                                    'ss' = 'Standardisation',
+                                                    'rs' = 'Robust normalisation'))
+
+myplot2
+
+
+
+
+ggsave('C:/Users/phily/Liveability-Index/output/uncertainty test/ua_rank_simulation_norm_450.png', plot = myplot2, width = 12, height = 12, dpi = 300)
+```
+
+### 6.5.4. LAD Rankings by diversity
+```{r plot ranking by diversity}
+mean_scores_by_test <- results %>%
+  group_by(LAD, test, diversity_weight) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 33, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests_norm <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+
+
+# Calculate the median rank for each borough
+median_rank_by_borough <- lad_rank_for_288_tests_norm %>%
+  group_by(LAD) %>%
+  summarize(median_rank = median(LAD_rank))
+
+# Reorder the LAD factor levels based on the median rank
+lad_rank_for_288_tests_norm$LAD <- factor(
+  lad_rank_for_288_tests_norm$LAD,
+  levels = median_rank_by_borough$LAD[order(median_rank_by_borough$median_rank)]
+)
+
+
+# Define custom colors for each diversity_weight value
+my_colors <- c("1" = "firebrick2", "2" = "purple4", "3" = "darkgoldenrod1",
+               "4" = "mediumseagreen", "5" = 'deepskyblue1', '6' = 'grey40')
+
+# Create the plot
+myplot3 <- ggplot(lad_rank_for_288_tests_norm, aes(x = LAD, y = LAD_rank)) +
+  geom_boxplot(fill = "black", alpha = 0.1, width = 0.5) +
+  geom_jitter(aes(color = as.factor(diversity_weight)), width = 0.2, size = 0.4, alpha = 0.3) +
+  labs(x = "Local Area District (LAD)", y = "Rank", color = "Diversity Indicators") +
+  ggtitle("Liveability Rank of Boroughs under Different Simulations") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5, family = 'sans', margin = margin(b = 20))) +
+  scale_color_manual(values = my_colors, labels = c('1' = 'Original',
+                                                    '2' = 'Diversity of Commerce',
+                                                    '3' = 'Diversity of Education',
+                                                    '4' = 'Diversity of Entertainment',
+                                                    '5' = 'Diversity of Living',
+                                                    '6' = 'Diversity of Healthcare'))
+
+myplot3
+
+
+
+
+ggsave('C:/Users/phily/Liveability-Index/output/uncertainty test/ua_rank_simulation_div_450.png', plot = myplot3, width = 12, height = 12, dpi = 300)
+```
+
+
+### 6.5.5. Average shift in London Borough Rankings - $\overline{R_{LAD}}$
+
+```{r}
+# Step 1: By grouping neighbourhoods by boroughs and test, we can calculate the aggregated average li_score for each borough. Due to the small size of city of London, there are no neighbourhoods found in the area. Moreover, City of London is an administrative boundary. Thus, the liveability of City of London cannot be compared as there is no comparable neighbourhoods when neighbourhoods are constructed with 600m isodistance, City of London has been excluded.
+
+mean_scores_by_test <- results %>%
+  filter(LAD != 'City of London') %>%
+  group_by(LAD, test) %>%
+  summarise(mean_li_score = mean(li_score))
+
+# Step 2: Calculate the rank of each borough under each of the 288 different test conditions. Boroughs with the highest li_score will have the rank of 32, while the one with the lowest will be assigned of a rank of 1.
+lad_rank_for_288_tests <- mean_scores_by_test %>%
+  group_by(test) %>%
+  mutate(LAD_rank = min_rank(mean_li_score))
+
+
+# step 3: baseline
+baseline <- lad_rank_for_288_tests %>%
+  filter(test == 'rank_exp_1_1_1') %>%
+  rename(LAD_rank_b = LAD_rank) %>% 
+  select(LAD, LAD_rank_b)
+
+# step 4: merge 288 scenarios with baseline data
+merged_data <- lad_rank_for_288_tests %>%
+  left_join(.,
+            baseline,
+            by = 'LAD') %>%
+  mutate(li_rank_change = abs(LAD_rank - LAD_rank_b)) %>% 
+  select(-c(test.y, LAD_rank_b)) %>%
+  rename(test = test.x)
+
+
+# step 5: average shift in rank
+avg_sft_LAD <- merged_data %>%
+  group_by(test) %>%
+  summarise(sum_rank_change = sum(li_rank_change),
+            Rs = sum_rank_change/32)
+
+# step 7: mean and sd of average shift in rank
+sd <- sd(avg_sft_LAD$Rs) # 0.334
+mean <- mean(avg_sft_LAD$Rs) # 1.238
+
+# step 8: save file
+file_path = 'C:/Users/phily/Liveability-Index/data/uncertainty test/average_shift_lad_450.csv'
+write.csv(avg_sft_LAD, file_path, row.names = F)
+```
+
+# 7. Results
+## 7.1. Data Import
+```{r}
+# london boundary
+london_boundary <- st_read('C:/Users/phily/Liveability-Index/data/boundary/london/london_boundary.shp') %>% st_transform(27700)
+
+boros <- st_read('C:/Users/phily/Liveability-Index/data/boundary/boros/London_Borough_Excluding_MHW.shp') %>% st_transform(., 27700)
+
+# LCI 
+lci <- read_csv('C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
+
+
+# left join nb_polygon and lci
+lci_1 <- left_join(lci,
+                   nb_polygon,
+                   by = 'nb_clus') %>%
+  st_as_sf()
+
+str(lci_1)
+```
+
+
+## 7.2. Liveability Index
+```{r OVerall Liverability Index Plot}
+# colour palette
+library(RColorBrewer)
+#colours = brewer.pal(name="RdYlGn", n=nlevels(lci_1$li_decile))
+
+# Reverse the 'viridis' color palette
+viridis_palette <- rev(viridisLite::viridis(10))
+
+# Create the map
+plot1 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'li_decile', 
+              #palette = 'viridis',
+              #palette = viridis_palette,
+              palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Liveability Profiles of 399 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot1
+tmap_save(plot1, 'C:/Users/phily/Liveability-Index/output/results/overall_LI.png', height = 6, width = 8, dpi = 300)
+```
+
+
+## 7.3. Diversity Domain
+```{r Diversity Plot}
+# diversity 10 decile
+lci_1 <- lci_1 %>% mutate(div_decile = ntile(diversity_score, 10))
+# 
+# # proximity 10 decile
+lci_1 <- lci_1 %>% mutate(prox_decile = ntile(proximity_score, 10))
+# 
+# # population 10 decile
+lci_1 <- lci_1 %>% mutate(pop_decile = ntile(pop_density_exp, 10))
+
+
+# Create the map
+plot2 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'div_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Diversity Domain Profiles of 399 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot2
+tmap_save(plot2, 'C:/Users/phily/Liveability-Index/output/results/diversity_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 7.4. Proximity Domain
+```{r Proximity Plot}
+# Create the map
+plot3 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'prox_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Proximity Domain Profiles of 399 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot3
+tmap_save(plot3, 'C:/Users/phily/Liveability-Index/output/results/proximity_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 7.5. Population Density Domain
+```{r density Plot}
+# Create the map
+plot4 <- tm_shape(boros) +
+  tm_fill(col = 'grey94') +
+  tm_borders() +
+  
+tm_shape(lci_1) +
+  tm_polygons(col = 'pop_decile', 
+              palette = "RdYlGn",
+              #palette = viridis_palette,
+              #palette = "RdYlGn", 
+              title = 'Decile',
+              style = 'cat') +
+  tm_compass(type = "arrow", position = c('left', 'bottom'), size = 2) + 
+  tm_scale_bar(text.size = 0.9, position = c("left", "bottom")) +
+  tm_layout(legend.position = c("right", "bottom"), 
+            title= "Population Density Domain Profiles of 399 Neighbourhoods in London", 
+            title.position = c('center', 'top'),
+            title.size = 30,
+            frame = FALSE,  # Remove the box surrounding the map
+            inner.margins = 0.1)
+
+
+plot4
+tmap_save(plot4, 'C:/Users/phily/Liveability-Index/output/results/density_domain.png', height = 6, width = 8, dpi = 300)
+
+```
+
+
+## 7.6. Decomposition of Indicators 
+```{r}
+# left join with LCI
+lci_2 <- left_join(lci,
+                   neighbourhood_lon,
+                   by = 'nb_clus')
+
+lci_per_borough <- lci_2 %>%
+  group_by(LAD) %>%
+  summarise(mean_d_c_score = mean(d_c_exp),
+            mean_d_edu_score = mean(d_edu_exp),
+            mean_d_enter_score = mean(d_enter_exp),
+            mean_d_l_score = mean(d_l_exp),
+            mean_d_h_score = mean(d_h_exp),
+            mean_p_c_score = mean(p_c_exp),
+            mean_p_edu_score = mean(p_edu_exp),
+            mean_p_enter_score = mean(p_enter_exp),
+            mean_p_l_score = mean(p_l_exp),
+            mean_p_h_score = mean(p_h_exp),
+            mean_den_score = mean(pop_density_exp),
+            mean_li_score = mean(li_score)) %>% select(-mean_li_score)
+
+# average liverability score sums upto individual indicator scores
+# All indicator values are standardised and 1/11 is equal weights of individual indicators.
+
+# multiply individual weights
+lci_per_borough$mean_d_c_score <- lci_per_borough$mean_d_c_score * 1/11
+lci_per_borough$mean_d_edu_score <- lci_per_borough$mean_d_edu_score * 1/11
+lci_per_borough$mean_d_enter_score <- lci_per_borough$mean_d_enter_score * 1/11
+lci_per_borough$mean_d_l_score <- lci_per_borough$mean_d_l_score * 1/11
+lci_per_borough$mean_d_h_score <- lci_per_borough$mean_d_h_score * 1/11
+lci_per_borough$mean_den_score <- lci_per_borough$mean_den_score * 1/11
+lci_per_borough$mean_p_c_score <- lci_per_borough$mean_p_c_score * 1/11
+lci_per_borough$mean_p_edu_score <- lci_per_borough$mean_p_edu_score * 1/11
+lci_per_borough$mean_p_enter_score <- lci_per_borough$mean_p_enter_score * 1/11
+lci_per_borough$mean_p_l_score <- lci_per_borough$mean_p_l_score * 1/11
+lci_per_borough$mean_p_h_score <- lci_per_borough$mean_p_h_score * 1/11
+```
+
+### 7.6.1. LAD Decomposition Plot
+```{r}
+library(ggplot2)
+
+# Define the legend names
+legend_names <- c("mean_d_c_score" = "Diversity of Commerce",
+                  "mean_d_edu_score" = "Diversity of Education",
+                  "mean_d_enter_score" = "Diversity of Entertainment",
+                  "mean_d_l_score" = "Diversity of Living",
+                  "mean_d_h_score" = "Diversity of Healthcare",
+                  "mean_p_c_score" = "Proximity to Commerce",
+                  "mean_p_edu_score" = "Proximity to Education",
+                  "mean_p_enter_score" = "Proximity to Entertainment",
+                  "mean_p_l_score" = "Proximity to Living",
+                  "mean_p_h_score" = "Proximity to Healthcare",
+                  "mean_den_score" = "Population Density")
+
+# Calculate the sum of indicators for each borough
+lci_per_borough$sum_indicators <- rowSums(select(lci_per_borough, starts_with("mean_")))
+
+# Reorder the levels of LAD based on the sum of indicators
+lci_per_borough$LAD <- factor(lci_per_borough$LAD, levels = lci_per_borough$LAD[order(lci_per_borough$sum_indicators)])
+
+# Reshape the data from wide to long format
+lci_long <- lci_per_borough %>%
+  pivot_longer(cols = starts_with("mean_"), names_to = "Indicator", values_to = "value")
+```
+
+
+```{r LAD Decomposed}
+# Create the stacked bar chart
+plot5 <- ggplot(lci_long, aes(x = LAD, y = value, fill = Indicator)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "London Boroughs (LAD)", y = "Indicator Value") +
+  ggtitle("Decomposition of Liveability Index into 11 Indicators") +
+  scale_fill_discrete(name = 'Indicator', labels = legend_names) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 11.5, family = 'sans'),
+        axis.text.y = element_text(size = 11.5, family = 'sans'),
+        axis.title = element_text(size = 14, family = 'sans'),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 15, family = 'sans'),
+        plot.margin = margin(30, 0, 50, 0))
+
+
+plot5
+ggsave('C:/Users/phily/Liveability-Index/output/results/decomposed_LI.png', plot5, height = 10, width = 10, dpi = 300)
+```
+
+### 7.6.2 Normalisation of Indicator Scores - Top 3 Boroughs
+```{r Top 3 Decomposed}
+# Find the maximum score for each indicator
+max_scores <- lci_long %>%
+  group_by(Indicator) %>%
+  summarise(max_score = max(value))
+
+# Calculate the proportion of each indicator score relative to the maximum score
+lci_long <- lci_long %>%
+  left_join(max_scores, by = "Indicator") %>%
+  mutate(proportion = value / max_score)
+
+# Select the top 3 boroughs with the highest sum of indicator scores
+top_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  head(3)
+
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the top 3 boroughs
+top_3_data <- lci_long %>%
+  filter(LAD %in% top_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+top_3_data <- top_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(top_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Top-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),  # Add a panel around strip (LAD titles)
+        
+        strip.text = element_text(size =20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('C:/Users/phily/Liveability-Index/output/results/top3_decomposed_500.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+
+### 7.6.3. Normalisation of Indicator Scores - Bottom 3 Boroughs
+```{r Top 3 Decomposed}
+bottom_3_boroughs <- lci_per_borough %>%
+  arrange(desc(sum_indicators)) %>%
+  tail(3)
+
+
+# Filter data for the bottom 3 boroughs
+bottom_3_data <- lci_long %>%
+  filter(LAD %in% bottom_3_boroughs$LAD)
+
+
+library(dplyr)
+
+# Recode the Indicator column with custom names
+bottom_3_data <- bottom_3_data %>%
+  mutate(Indicator = recode(Indicator,
+    "mean_d_c_score" = "Diversity of Commerce",
+    "mean_d_edu_score" = "Diversity of Education",
+    "mean_d_enter_score" = "Diversity of Entertainment",
+    "mean_d_l_score" = "Diversity of Living",
+    "mean_d_h_score" = "Diversity of Healthcare",
+    "mean_p_c_score" = "Proximity to Commerce",
+    "mean_p_edu_score" = "Proximity to Education",
+    "mean_p_enter_score" = "Proximity to Entertainment",
+    "mean_p_l_score" = "Proximity to Living",
+    "mean_p_h_score" = "Proximity to Healthcare",
+    "mean_den_score" = "Population Density"
+  ))
+
+
+# Create a single plot with shared y-axis in one row and three columns
+plot_combined <- ggplot(bottom_3_data, aes(x = Indicator, y = proportion, fill = Indicator)) +
+  geom_bar(stat = "identity") +
+  xlab('Indicator') +
+  ylab("Indicator Proportion") +
+  ggtitle("Decomposed Liveability Index for Bottom-Ranked 3 Boroughs") +
+  scale_fill_discrete(name = 'Indicator') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),  # Add margins (top, right, bottom, left) to axis labels
+        axis.text.y = element_text(hjust = 1, size = 14, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0)),
+        strip.background = element_rect(color = "black", fill = "grey90"),
+        strip.text = element_text(size = 20, family = 'sans', face = 'bold'),  # Increase font size and add margin below the strip text
+        axis.title = element_text(size = 20, family = 'sans', margin = margin(t = 10, r = 0, b = 10, l = 0), face = 'bold'),  # Add margins (top, right, bottom, left) to axis titles
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 26, family = 'sans', margin = margin(b = 20)),  # Add margin below the plot title
+        plot.margin = unit(c(1, 1, 2, 1), "lines"),  # Adjust the plot margins (top, right, bottom, left)
+        panel.spacing = unit(1.5, "lines")) +  # Adjust the margin between plots
+  facet_grid(. ~ LAD, scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_continuous(limits = c(0, 1)) +  # Set the y-axis limits to 0 and 1
+  coord_flip() +
+  guides(fill = FALSE)  # Remove the legend
+
+# Display the combined plot
+print(plot_combined)
+
+
+
+ggsave('C:/Users/phily/Liveability-Index/output/results/bottom3_decomposed_500.png' ,plot_combined, dpi = 300, width = 18, height = 10)
+```
+
+# 8. Sensitivity Analysis
+## 8.1. Customised functions
+```{r dirichlet functions}
+# DIRICHLET WEIGHT SAMPLES
+# move last 'n' items from a list to the front
+lCycle <- function(x, n = 1) {
+  if (n == 0) x else c(tail(x, -n), head(x, n))
+}
+
+# this function creates a table of nsamples from the dirichlet distribution for nweights (no. of indicators)
+# each of the nweights will be treated with the alpha values in turn, while the others remain at 1
+dirSampleSpread <- function(alpha_vals, nsamples, nweights){
+  
+  out <- data.frame()
+  # loop through alpha values
+  for (a in seq(1, length(alpha_vals))){
+    
+    # create a vector 'weights' where all weights are set to 1, except for the last one, which is set to the current alpha value
+    weights <- c(rep(1, (nweights - 1)), alpha_vals[a])
+
+    for (w in seq(0, nweights - 1)){
+      
+      # By cycling the weights, each indicator gets a turn to be weighted by alpha value, while other weights remain at 1
+      w_list <- lCycle(weights, w)
+      
+      # generate dirichlet samples using the 'w_list' as the parameter
+      weight_samples_m <- rdirichlet(nsamples, w_list)
+      # turn to dataframe
+      weight_samples <- as.data.frame(weight_samples_m)
+      # rename weight variables and then store alpha value
+      names(weight_samples) <- paste('w', seq(1, nweights), sep = '')
+      
+      weight_samples$alpha <-alpha_vals[a]
+      
+      # tracking focused weight - 'w_focus' indicates which weight in the original sequence was assigned the alpha value in the current iteration
+      weight_samples$w_focus <- nweights - w
+      
+      # # bind to output table
+      out <- rbind(out, weight_samples)
+    }
+  }
+  out
+}
+```
+
+```{r functions for diversity}
+# exponential transformation function
+# The higher the value is, the higher transformed value it gets.
+# As higher value indicates the better diversity of neighbourhood
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# function to rank and exponentially transform a variable in a given table
+rank_exp <- function(df, var){
+  
+  var <- enquo(var)
+  # select relevant data from df
+  data <- select(df, nb_clus, !! var)
+  # create a ranking, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!! var),
+           rank_s = scales::rescale(rank, to = c(0, 1)),
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+```{r functions for proximity}
+# exponential transformation function
+# Unlike diversity, the shorter the distance is, the better the proximity is.
+# So, we have to modify the previous function.
+# We have to reverse the rank as this is opposite of diversity
+# Exponential transformation function
+exp_trans <- function(var){
+  -23 * log(1 - (var * (1 - (exp(-100/23)))))
+}
+
+# Function to rank and exponentially transform a variable in a given table
+rank_exp_proximity <- function(df, var){
+  var <- enquo(var)
+  
+  # Select relevant data from df
+  data <- select(df, nb_clus, !!var)
+  
+  # Create a ranking, reverse the rank for proximity scores, rescale to 0-1, then apply exponential transformation
+  data %>%
+    mutate(rank = min_rank(!!var),
+           reversed_rank = max(rank) - rank + 1,  # Reversing the rank for proximity scores
+           rank_s = scales::rescale(reversed_rank, to = c(0, 1)),  # Rescale the reversed rank to 0-1
+           exp = exp_trans(rank_s)) %>%
+    select(exp)
+}
+```
+
+
+## 8.2. Data
+It is important to import all indicator dataset before normalisation and aggregation step because we are trying to assess how weighting changes in one indicator affects the whole liveability ranking.
+```{r data import}
+library(gtools)
+
+# read in data
+df <- read.csv('C:/Users/phily/Liveability-Index/data/domain data/raw_domain_indicator_nb_450.csv')
+baseline <- read.csv('C:/Users/phily/Liveability-Index/data/uncertainty test/li_reference_rank_450.csv')
+
+diversity <- df[1:6]
+proximity <- df[c(1, 7:11)]
+pop_density <- df[c(1, 12)]
+```
+
+### 8.2.1. Dirichlet Sampling for Proximity and Diversity domain
+```{r sampling for proximity and diversity domains - 5 indicators}
+library(gtools)
+
+# create table of sample weights - 5 variables, 1000 samples for each iteration, alpha ranging from 1-10
+weights <- dirSampleSpread(alpha_vals = seq(1, 10, 1), nsamples = 1000, nweights = 5)
+
+# sense check output
+weights <- arrange(weights, w_focus, alpha)
+nrow(weights)
+head(weights)
+head(filter(weights, w_focus == 1))
+head(filter(weights, w_focus == 2))
+head(filter(weights, w_focus == 3))
+head(filter(weights, w_focus == 4))
+head(filter(weights, w_focus == 5))
+weights %>% group_by(w_focus, alpha) %>% summarise(n = n())
+
+```
+
+#### 8.2.1.1. testing SA for Diversity domain
+```{r proximity and population domain}
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# Proximity domain - final equal weighting
+prox_weight <- proximity %>%
+  mutate(proximity_score = (p_c_exp / 5) + (p_edu_exp / 5) +
+           (p_enter_exp / 5) + (p_l_exp / 5) + (p_h_exp / 5))
+
+prox_weight['proximity_exp'] <- rank_exp(prox_weight, proximity_score)
+prox_fin <- select(prox_weight, nb_clus, proximity_exp)
+
+# population density
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+pop_fin <- pop_density %>% select(nb_clus, pop_density_exp)
+
+# merge prox_fin and pop_fin
+prox_pop <- prox_fin %>% left_join(pop_fin, by = 'nb_clus')
+```
+
+
+```{r diversity domain}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# loop for sensitivity
+score_list <- NULL
+
+for (w in seq(1, nrow(weights))) {
+  
+  # use weights from list to calculate score
+  diversity <- diversity %>%
+    mutate(diversity_score = (d_c_exp * weights[w, 'w1']) + 
+             (d_edu_exp * weights[w, 'w2']) + 
+             (d_enter_exp * weights[w, 'w3']) + 
+             (d_l_exp * weights[w, 'w4']) + 
+             (d_h_exp * weights[w, 'w5']))
+  
+  # transform to exponential and create final table
+  diversity['diversity_exp'] <- rank_exp(diversity, diversity_score)
+  div_fin <- select(diversity, nb_clus, diversity_exp)
+  
+  # final index
+  li_temp <- prox_pop %>% 
+    left_join(div_fin, by = 'nb_clus')
+  
+  li_w1 <- li_temp %>%
+    mutate(li_score = (proximity_exp / 3) + (pop_density_exp / 3) + 
+             (diversity_exp / 3))
+  
+  li_w1 <- li_w1 %>% mutate(li_rank = min_rank(li_score))
+  
+  # create final output table - joining to baseline to calculate rank change per neighbourhood
+  li_fin <- select(li_w1, nb_clus, li_rank) %>%
+    left_join(baseline, by = 'nb_clus') %>%
+    mutate(rank_change = abs(li_rank - li_rank_b))
+  
+  mean_r_change <- mean(li_fin$rank_change)
+  score_list <- append(score_list, mean_r_change)
+  
+}
+
+# append score list of mean rank change per test back to weights table
+weights$rank_change <- score_list
+weights$rank_change_percent <- score_list / 399
+
+file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv'
+
+write.csv(weights, file_path, row.names = FALSE)
+```
+
+
+
+#### 8.2.1.2. testing SA for Proximity domain
+```{r diversity and population domain}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# diversity domain - final equal weighting
+div_weight <- diversity %>%
+  mutate(diversity_score = (d_c_exp / 5) + (d_edu_exp / 5) +
+           (d_enter_exp / 5) + (d_l_exp / 5) + (d_h_exp / 5))
+
+div_weight['diversity_exp'] <- rank_exp(div_weight, diversity_score)
+div_fin <- select(div_weight, nb_clus, diversity_exp)
+
+# population density
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+pop_fin <- pop_density %>% select(nb_clus, pop_density_exp)
+
+# merge prox_fin and pop_fin
+div_pop <- div_fin %>% left_join(pop_fin, by = 'nb_clus')
+```
+
+
+```{r proximity domain}
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# loop for sensitivity
+score_list <- NULL
+
+for (w in seq(1, nrow(weights))) {
+  
+  # use weights from list to calculate score
+  proximity <- proximity %>%
+    mutate(proximity_score = (p_c_exp * weights[w, 'w1']) + 
+             (p_edu_exp * weights[w, 'w2']) + 
+             (p_enter_exp * weights[w, 'w3']) + 
+             (p_l_exp * weights[w, 'w4']) + 
+             (p_h_exp * weights[w, 'w5']))
+  
+  # transform to exponential and create final table
+  proximity['proximity_exp'] <- rank_exp(proximity, proximity_score)
+  prox_fin <- select(proximity, nb_clus, proximity_exp)
+  
+  # final index
+  li_temp <- div_pop %>% 
+    left_join(prox_fin, by = 'nb_clus')
+  
+  li_w1 <- li_temp %>%
+    mutate(li_score = (proximity_exp / 3) + (pop_density_exp / 3) + 
+             (diversity_exp / 3))
+  
+  li_w1 <- li_w1 %>% mutate(li_rank = min_rank(li_score))
+  
+  # create final output table - joining to baseline to calculate rank change per neighbourhood
+  li_fin <- select(li_w1, nb_clus, li_rank) %>%
+    left_join(baseline, by = 'nb_clus') %>%
+    mutate(rank_change = abs(li_rank - li_rank_b))
+  
+  # calculate the mean rank_change in li_fin data from each sample simulation
+  mean_r_change <- mean(li_fin$rank_change)
+  
+  # store it in the list
+  score_list <- append(score_list, mean_r_change)
+  
+}
+
+# append score list of mean rank change per test back to weights table
+weights$rank_change <- score_list
+weights$rank_change_percent <- score_list / 399
+
+file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv'
+
+write.csv(weights, file_path, row.names = FALSE)
+```
+
+
+
+### 8.2.2. Dirichlet Sampling for LI domains
+```{r sampling for proximity and diversity domains - 3 domains}
+# create table of sample weights - 3 variables, 1000 samples for each iteration, alpha ranging from 1-10
+weights <- dirSampleSpread(alpha_vals = seq(1, 10, 1), nsamples = 1000, nweights = 3)
+
+# sense check output
+weights <- arrange(weights, w_focus, alpha)
+nrow(weights)
+head(weights)
+head(filter(weights, w_focus == 1))
+head(filter(weights, w_focus == 2))
+head(filter(weights, w_focus == 3))
+weights %>% group_by(w_focus, alpha) %>% summarise(n = n())
+```
+
+```{r all domains}
+# exponential transformation on each diversity indicator
+diversity[,'d_c_exp'] <- rank_exp(diversity, d_c)
+diversity[,'d_edu_exp'] <- rank_exp(diversity, d_edu)
+diversity[,'d_enter_exp'] <- rank_exp(diversity, d_enter)
+diversity[,'d_l_exp'] <- rank_exp(diversity, d_l)
+diversity[,'d_h_exp'] <- rank_exp(diversity, d_h)
+
+# diversity domain - final equal weighting
+div_weight <- diversity %>%
+  mutate(diversity_score = (d_c_exp / 5) + (d_edu_exp / 5) +
+           (d_enter_exp / 5) + (d_l_exp / 5) + (d_h_exp / 5))
+
+div_weight['diversity_exp'] <- rank_exp(div_weight, diversity_score)
+div_fin <- select(div_weight, nb_clus, diversity_exp)
+
+
+
+# exponential transformation on each proximity indicator
+proximity[,'p_c_exp'] <- rank_exp_proximity(proximity, p_c)
+proximity[,'p_enter_exp'] <- rank_exp_proximity(proximity, p_enter)
+proximity[,'p_edu_exp'] <- rank_exp_proximity(proximity, p_edu)
+proximity[,'p_l_exp'] <- rank_exp_proximity(proximity, p_l)
+proximity[,'p_h_exp'] <- rank_exp_proximity(proximity, p_h)
+
+# Proximity domain - final equal weighting
+prox_weight <- proximity %>%
+  mutate(proximity_score = (p_c_exp / 5) + (p_edu_exp / 5) +
+           (p_enter_exp / 5) + (p_l_exp / 5) + (p_h_exp / 5))
+
+prox_weight['proximity_exp'] <- rank_exp(prox_weight, proximity_score)
+prox_fin <- select(prox_weight, nb_clus, proximity_exp)
+
+# population density
+pop_density['pop_density_exp'] <- rank_exp(pop_density, pop_density)
+pop_fin <- pop_density %>% select(nb_clus, pop_density_exp)
+
+
+# all domains
+all_fin <- div_fin %>% left_join(prox_fin, by = 'nb_clus') %>% 
+  left_join(pop_fin, by = 'nb_clus')
+  
+```
+
+```{r loop}
+# loop for sensitivity
+score_list <- NULL
+
+for (w in seq(1, nrow(weights))) {
+  
+  # use weights from list to calculate score
+  all_fin <- all_fin %>%
+    mutate(li_score = (diversity_exp * weights[w, 'w1']) + 
+             (proximity_exp * weights[w, 'w2']) + 
+             (pop_density_exp * weights[w, 'w3']))
+  
+  # transform to exponential and create final table
+  all_fin['li_exp'] <- rank_exp(all_fin, li_score)
+  #li_fin <- select(all_fin, nb_clus, li_exp, li_score)
+  
+  # final index
+  li_w1 <- all_fin %>% mutate(li_rank = min_rank(li_score))
+  
+  # create final output table - joining to baseline to calculate rank change per neighbourhood
+  li_fin <- select(li_w1, nb_clus, li_rank) %>%
+    left_join(baseline, by = 'nb_clus') %>%
+    mutate(rank_change = abs(li_rank - li_rank_b))
+  
+  mean_r_change <- mean(li_fin$rank_change)
+  score_list <- append(score_list, mean_r_change)
+  
+}
+
+# append score list of mean rank change per test back to weights table
+weights$rank_change <- score_list
+weights$rank_change_percent <- score_list / 399
+
+file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_results_1000.csv'
+
+write.csv(weights, file_path, row.names = FALSE)
+```
+
+## 8.3. Visualisation
+### 8.3.1. All Domains
+```{r data import}
+# data read
+data <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_results_1000.csv')
+
+# reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
+data_summary <- data %>%
+  group_by(alpha, w_focus) %>%
+  summarise(mean_rank_change = mean(rank_change_percent))
+
+# Convert w_focus to factor and rename
+data_summary$w_focus <- factor(data_summary$w_focus, levels = c(1, 2, 3), labels = c("Diversity", "Proximity", "Population Density"))
+
+# Filter the data to include only rows where alpha increases by 1
+markers <- data_summary %>%
+  filter(alpha %% 1 == 0)
+
+# Create the line graph with markers
+plot <- ggplot(data_summary, aes(x = alpha, y = mean_rank_change, color = w_focus)) +
+  geom_line() +
+  geom_point(data = markers, aes(x = alpha, y = mean_rank_change), shape = 19, size = 3) +  # Add markers
+  labs(title = "Sensitivity Analysis - Domain Weights",
+       x = "Alpha Value",
+       y = "Mean Rank Change",
+       color = "Liveability Domains") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),  # Center the main title
+    legend.title = element_text(face = "bold")  # Make legend title bold
+  )
+
+# Display the plot
+print(plot)
+
+# Save the plot
+ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_plot.png", plot = plot, width = 10, height = 6)
+
+```
+
+### 8.3.2. Diversity Domains
+```{r data import}
+
+# data read
+data_1 <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv')
+
+# reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
+data_summary_1 <- data_1 %>%
+  group_by(alpha, w_focus) %>%
+  summarise(mean_rank_change = mean(rank_change_percent))
+
+# Convert w_focus to factor and rename
+data_summary_1$w_focus <- factor(data_summary_1$w_focus, levels = c(1, 2, 3, 4, 5), labels = c("Diversity of Commerce", "Diversity of Education", "Diversity of Entertainment", 'Diversity of Living', 'Diversity of Healthcare'))
+
+# Filter the data to include only rows where alpha increases by 1
+markers <- data_summary_1 %>%
+  filter(alpha %% 1 == 0)
+
+# Create the line graph with markers
+plot <- ggplot(data_summary_1, aes(x = alpha, y = mean_rank_change, color = w_focus)) +
+  geom_line() +
+  geom_point(data = markers, aes(x = alpha, y = mean_rank_change), shape = 19, size = 3) +  # Add markers
+  labs(title = "Sensitivity Analysis - Diversity Indicator Weights",
+       x = "Alpha Value",
+       y = "Mean Rank Change",
+       color = "Diversity Indicator") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),  # Center the main title
+    legend.title = element_text(face = "bold")  # Make legend title bold
+  )
+
+# Display the plot
+print(plot)
+
+# Save the plot
+ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_diversity_plot.png", plot = plot, width = 10, height = 6)
+```
+
+### 8.3.3. Proximity Domain Indicators
+```{r data import}
+# data read
+data_1 <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv')
+
+# reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
+data_summary_1 <- data_1 %>%
+  group_by(alpha, w_focus) %>%
+  summarise(mean_rank_change = mean(rank_change_percent))
+
+# Convert w_focus to factor and rename
+data_summary_1$w_focus <- factor(data_summary_1$w_focus, levels = c(1, 2, 3, 4, 5), labels = c("Proximity to Commerce", "Proximity to Education", "Proximity to Entertainment", 'Proximity to Living', 'Proximity to Healthcare'))
+
+# Filter the data to include only rows where alpha increases by 1
+markers <- data_summary_1 %>%
+  filter(alpha %% 1 == 0)
+
+# Create the line graph with markers
+plot <- ggplot(data_summary_1, aes(x = alpha, y = mean_rank_change, color = w_focus)) +
+  geom_line() +
+  geom_point(data = markers, aes(x = alpha, y = mean_rank_change), shape = 19, size = 3) +  # Add markers
+  labs(title = "Sensitivity Analysis - Proximity Indicator Weights",
+       x = "Alpha Value",
+       y = "Mean Rank Change",
+       color = "Proximity Indicator") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),  # Center the main title
+    legend.title = element_text(face = "bold")  # Make legend title bold
+  )
+
+# Display the plot
+print(plot)
+
+# Save the plot
+ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_proximity_plot.png", plot = plot, width = 10, height = 6)
+```
+
+# 9. Validation against IMD
+## 9.1. Data Import
+```{r}
+nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg')
+
+hexagon_scores <- st_read('C:/Users/phily/Liveability-Index/data/IMD/hexagon_imd.geojson')
+
+gc()
+```
+## 9.2. Projecting hexagon-level IMD score to neighbourhood-level
+```{r GBS scores at neighbourhood level}
+# calculate the area size of each neighbourhood
+hexagon_scores$hex_area <- st_area(hexagon_scores)
+
+# Perform spatial intersection
+intersection <- st_intersection(hexagon_scores, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+max(intersection$area_proportion)
+min(intersection$area_proportion)
+
+# Calculate the estimated population within each neighborhood polygon
+intersection$estimated_imd_score <- intersection$weighted_avg_imd * intersection$area_proportion
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+neighbourhood_imd <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(weighted_avg_imd = sum(estimated_imd_score) / sum(area_proportion))
+
+min(neighbourhood_imd$weighted_avg_imd)
+max(neighbourhood_imd$weighted_avg_imd)
+
+# # save data - just those with populations
+file_path = 'C:/Users/phily/Liveability-Index/data/IMD/neighbourhood_450_imd.geojson'
+# #
+st_write(neighbourhood_imd, file_path, driver = 'GeoJSON')
+```
+
+## 9.3. Correlation Plots
+```{r read in data}
+lci <- read_csv('C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
+gc()
+```
+
+```{r merge data}
+# Merge the dataframes based on the 'nb_clus' column
+merged_data <- merge(neighbourhood_imd, lci, by = "nb_clus")
+
+# drop units
+library(units)
+
+merged_data$weighted_avg_imd <- drop_units(merged_data$weighted_avg_imd)
+```
+
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_imd, merged_data$li_exp,
+         conf.level = 0.99)
+```
+The correlation between two indices are significantly different from 0 at the 1% level.
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_imd ~ li_exp, data = merged_data)
+
+# Calculate Adjusted R-squared - 0.56
+summary(lm_model)$adj.r.squared
+
+# RMSE
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))
+```
+An increase of the li_exp by 1 unit decreases the IMD score by 0.019. The adjusted R-square of 0.44 between the Liveability Composite Index (LCI) and the IMD score. RMSE is 29.95.
+
+```{r plot}
+# Create a scatter plot
+plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_imd)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LI score") +
+  ylab("Geographical Barriers Sub-domain score") +
+  ggtitle("Correlation between LI score and the GBS score") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+file_path = 'C:/Users/phily/Liveability-Index/output/IMD/correlation_plot_450.png'
+ggsave(file_path, plot, dpi = 300, width = 6, height = 6)
+```
+
+```{r}
+library(ggplot2)
+
+# Get the list of residuals
+res <- resid(lm_model)
+
+# Create a data frame for the plot
+residuals_df <- data.frame(fitted = fitted(lm_model), residual = res)
+
+residuals_df$fitted <- drop_units(residuals_df$fitted)
+residuals_df$residual <- drop_units(residuals_df$residual)
+
+# Create the plot using ggplot2
+plot1 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
+  geom_jitter(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  xlab("Fitted Values") +
+  ylab("Residuals") +
+  ggtitle("Residuals vs. Fitted Plot") +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+file_path = 'C:/Users/phily/Liveability-Index/output/IMD/residual_plot_450.png'
+
+ggsave(file_path, plot1, dpi = 300, width = 6, height = 6)
+```
+
+# 10. Active Travel
+```{r}
+library(sf)
+library(here)
+library(dplyr)
+# library(rgdal)
+library(sp)
+library(tidyverse)
+```
+
+## 10.1.  Average Footfall data at Uber H3 level 10
+```{r footfall per hexagon}
+# average footfall score per hexagon data
+result <- read.csv("C:/Users/phily/Liveability-Index/data/footfall/average_footfall_per_hexagon.csv")
+
+# read in UBER H3 level 10 hexagon cell data that covers london
+london_hex <-st_read("C:/Users/phily/Liveability-Index/data/footfall/Greater_London.json") %>% 
+  st_transform(27700)
+```
+
+
+
+```{r embed avg footfall data into London hexagon data}
+# we need geometry column so we need to merge the result avg footfall data with hexagon grid sf data
+hex_footfall <- left_join(london_hex,
+                          result,
+                          by = c('X_index' = 'hex_code')) %>% select(-c(2,3))
+
+
+# replace na values with 0 as these na values indicate that people did not visit these hexagons.
+hex_footfall['average_footfall'][is.na(hex_footfall['average_footfall'])] <- 0
+sum(is.na(hex_footfall))
+
+# max/min
+max(hex_footfall$average_footfall) # 57.64
+min(hex_footfall$average_footfall) # 0 originated from hexagons that people did not visit
+
+# plot distribution of footfall data
+ggplot(hex_footfall, aes(average_footfall)) +
+  geom_histogram(binwidth = 0.5) +
+  xlab('Average Normalised Footfall Score') +
+  ylab('Frequency') +
+  ggtitle('The Distribution of Average Normalised Footfall Score')
+```
+
+
+## 10.2. Footfall Score Projection to a Neighbourhood-level
+```{r neighbourhood polygons}
+nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>% st_transform(27700)
+```
+
+
+```{r footfall scores at neighbourhood level}
+# calculate the area size of each neighbourhood
+hex_footfall$hex_area <- st_area(hex_footfall)
+
+# Perform spatial intersection - 139011
+intersection <- st_intersection(hex_footfall, nb_polygon)
+
+# Calculate the proportion of each hexagon's area within each neighborhood polygon
+intersection$area_proportion <- st_area(intersection) / intersection$hex_area
+
+max(intersection$area_proportion)
+min(intersection$area_proportion)
+
+# Calculate the estimated footfall score within each neighborhood polygon
+intersection$estimated_footfall_score <- intersection$average_footfall * intersection$area_proportion
+
+# When sum of weights does not sum up to 1, weighted average is calculated by 
+# Sum of each number multiplied by its weight / sum of all weights = weighted average
+# Group by hexagon index
+neighbourhood_fs <- intersection %>%
+  group_by(nb_clus) %>%
+  summarise(weighted_avg_footfall = sum(estimated_footfall_score) / sum(area_proportion))
+
+min(neighbourhood_fs$weighted_avg_footfall) # 0.03
+max(neighbourhood_fs$weighted_avg_footfall) # 1.45
+
+# save data - just those with populations
+file_path = 'C:/Users/phily/Liveability-Index/data/footfall/footfall_nb_450.geojson'
+
+st_write(neighbourhood_fs, file_path, driver = 'GeoJSON')
+gc()
+```
+
+
+## 10.3.  Difference in Active Travel Frequency between Neighbourhoods
+```{r load and merge data}
+# liveability index
+lci <- read_csv('C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
+
+
+# neighbourhood-level footfall score
+neighbourhood_fs <- neighbourhood_fs %>% st_transform(27700)
+
+# merge lci and footfall data
+# Merge the dataframes based on the 'nb_clus' column
+merged_data <- merge(neighbourhood_fs, lci, by = "nb_clus")
+merged_data <- merged_data %>% st_set_geometry(NULL)
+```
+
+### 10.3.1. Normality Test - Shapiro-wilk Test
+```{r normality test}
+# Load required library
+library(stats)
+
+# separate neighbourhoods based on liveability scores
+high_liveability <- merged_data[merged_data$li_exp >= median(merged_data$li_exp), c('nb_clus', 'li_exp', "weighted_avg_footfall")]
+low_liveability <- merged_data[merged_data$li_exp < median(merged_data$li_exp), c('nb_clus', 'li_exp', "weighted_avg_footfall")]
+
+# drop units
+high_liveability$weighted_avg_footfall <- drop_units(high_liveability$weighted_avg_footfall)
+low_liveability$weighted_avg_footfall <- drop_units(low_liveability$weighted_avg_footfall)
+
+
+# shapiro wilk test
+# Perform Shapiro-Wilk test for high liveability
+shapiro_test_group1 <- shapiro.test(high_liveability$weighted_avg_footfall)
+
+# Perform Shapiro-Wilk test for low liveability
+shapiro_test_group2 <- shapiro.test(low_liveability$weighted_avg_footfall)
+
+```
+
+
+
+```{r}
+# Print the test results for Group 1 - p-value = 1.698e-08
+print(shapiro_test_group1)
+```
+
+```{r}
+# Print the test results for Group 2 - p-value = 0.3046
+print(shapiro_test_group2)
+```
+The distribution of high liveability neighbourhood group was significantly different from normal distribution. However, that of low liveability neighbourhood group showed a normal distribution.
+
+```{r plot}
+merged_data <- merged_data %>%
+  mutate(liveability_group = case_when(
+    li_exp >= median(li_exp) ~ 'High Liveability Neighbourhoods',
+    TRUE ~ 'Low Liveability Neighbourhoods'
+  )) %>% drop_units()
+
+mediantwogroups <- merged_data %>%
+  group_by(liveability_group) %>%
+  summarise(median = median(weighted_avg_footfall, na.rm = T))
+
+# Plot histograms
+plot <- ggplot(merged_data, aes(x = weighted_avg_footfall, color = liveability_group, fill = liveability_group)) +
+  geom_histogram(position = "identity", alpha = 0.3) +
+  geom_vline(data = mediantwogroups,
+             aes(xintercept = median,
+                 color = liveability_group),
+             linetype = 'dashed') +
+  
+  labs(x = "Normalised Footfall Scores", 
+       y = "Frequency", 
+       title = "Footfall Scores by Liveability Groups",
+       color = "Liveability Group", fill = "Liveability Group") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 13),
+        legend.title = element_text(size = 10, face = "bold"))
+
+plot
+file_path = 'C:/Users/phily/Liveability-Index/output/active travel/normalised_fs_by_nb_groups.png'
+ggsave(file_path, plot, dpi = 300, height = 5, width = 7)
+```
+Given that high liveability neighbourhood does not follow a normal distribution while the other does, the appropriate statistical test to compare the difference in active travel patterns between the two groups would be a **non-parametric test**. **Non-parametric tests** do not assume normality and are suitable for comparing distributions when at least one group does not follow a normal distribution.
+
+Therefore, the Mann-Whitney U Test (Wilcoxon Rank-Sum Test) would be the most straightforward and appropriate method to compare the difference in active travel patterns between the high and low liveability neighbourhoods, considering the non-normal distribution in one of the groups.
+
+
+```{r Mann Whitney Test}
+# Two independent groups
+# Perform Wilcoxon rank sum test (Mann-Whitney U test)
+wilcox_test_result <- wilcox.test(high_liveability$weighted_avg_footfall, low_liveability$weighted_avg_footfall)
+
+# Print the result
+print(wilcox_test_result)
+```
+In summary, based on the Mann-Whitney U test, we can confidently conclude that there is a statistically significant difference in footfall scores between neighbourhoods with high liveability scores and neighbourhoods with low liveability scores.
+
+```{r}
+# Calculate the U statistic from the test result
+u_statistic <- wilcox_test_result$statistic
+
+# Get the sample sizes
+n1 <- length(high_liveability$weighted_avg_footfall)
+n2 <- length(low_liveability$weighted_avg_footfall)
+
+# Calculate the effect size (r) - 0.872
+effect_size_r <- u_statistic / (n1 * n2)
+
+# Print the effect size
+cat("Effect Size (r):", effect_size_r, "\n")
+
+```
+
+
+## 10.4. Correlation between Active Travel Frequency and LCI
+```{r}
+# correlation test
+cor.test(merged_data$weighted_avg_footfall, merged_data$li_exp,
+         conf.level = 0.99)
+```
+
+```{r linear regression}
+# Calculate the R-squared and RMSE (Root Mean Squared Error)
+lm_model <- lm(weighted_avg_footfall ~ li_exp, data = merged_data)
+
+# Calculate Adjusted R-squared - 0.592
+summary(lm_model)$adj.r.squared
+
+# RMSE - 29.14
+predicted_values <- predict(lm_model)
+rmse <- sqrt(mean((merged_data$li_exp - predicted_values)^2))  
+```
+
+```{r plot}
+# Create a scatter plot
+plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_footfall)) +
+  geom_jitter(alpha = 0.5) +
+  geom_smooth(method = "lm", color = "dodgerblue2") +
+  xlab("LI score") +
+  ylab("Normalised Footfall Scores") +
+  ggtitle("Correlation between LI score and the Normalised Footfall score") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot
+
+file_path = 'C:/Users/phily/Liveability-Index/output/active travel/ff_li_correlation.png'
+ggsave(file_path, plot, dpi = 300, width = 6, height = 6)
+```
