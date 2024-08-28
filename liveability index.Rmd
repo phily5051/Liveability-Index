@@ -2330,8 +2330,8 @@ It is important to import all indicator dataset before normalisation and aggrega
 library(gtools)
 
 # read in data
-df <- read.csv('C:/Users/phily/Liveability-Index/data/domain data/raw_domain_indicator_nb_450.csv')
-baseline <- read.csv('C:/Users/phily/Liveability-Index/data/uncertainty test/li_reference_rank_450.csv')
+df <- read.csv('C:/Users/phily/liveability-index/data/domain data/raw_domain_indicator_nb_450.csv')
+baseline <- read.csv('C:/Users/phily/liveability-index/data/uncertainty test/li_reference_rank_450.csv')
 
 diversity <- df[1:6]
 proximity <- df[c(1, 7:11)]
@@ -2433,7 +2433,7 @@ for (w in seq(1, nrow(weights))) {
 weights$rank_change <- score_list
 weights$rank_change_percent <- score_list / 399
 
-file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv'
+file_path = 'C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv'
 
 write.csv(weights, file_path, row.names = FALSE)
 ```
@@ -2518,7 +2518,7 @@ for (w in seq(1, nrow(weights))) {
 weights$rank_change <- score_list
 weights$rank_change_percent <- score_list / 399
 
-file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv'
+file_path = 'C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv'
 
 write.csv(weights, file_path, row.names = FALSE)
 ```
@@ -2617,7 +2617,7 @@ for (w in seq(1, nrow(weights))) {
 weights$rank_change <- score_list
 weights$rank_change_percent <- score_list / 399
 
-file_path = 'C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_results_1000.csv'
+file_path = 'C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_results_1000.csv'
 
 write.csv(weights, file_path, row.names = FALSE)
 ```
@@ -2626,7 +2626,7 @@ write.csv(weights, file_path, row.names = FALSE)
 ### 8.3.1. All Domains
 ```{r data import}
 # data read
-data <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_results_1000.csv')
+data <- read.csv('C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_results_1000.csv')
 
 # reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
 data_summary <- data %>%
@@ -2658,7 +2658,7 @@ plot <- ggplot(data_summary, aes(x = alpha, y = mean_rank_change, color = w_focu
 print(plot)
 
 # Save the plot
-ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_plot.png", plot = plot, width = 10, height = 6)
+ggsave(filename = "C:/Users/phily/liveability-index/output/sensitivity analysis/sensitivity_analysis_plot.png", plot = plot, width = 10, height = 6, dpi = 300)
 
 ```
 
@@ -2666,7 +2666,7 @@ ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/
 ```{r data import}
 
 # data read
-data_1 <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv')
+data_1 <- read.csv('C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_diversity_results_1000.csv')
 
 # reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
 data_summary_1 <- data_1 %>%
@@ -2698,13 +2698,13 @@ plot <- ggplot(data_summary_1, aes(x = alpha, y = mean_rank_change, color = w_fo
 print(plot)
 
 # Save the plot
-ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_diversity_plot.png", plot = plot, width = 10, height = 6)
+ggsave(filename = "C:/Users/phily/liveability-index/output/sensitivity analysis/sensitivity_analysis_diversity_plot.png", plot = plot, width = 10, height = 6, dpi = 300)
 ```
 
 ### 8.3.3. Proximity Domain Indicators
 ```{r data import}
 # data read
-data_1 <- read.csv('C:/Users/phily/Liveability-Index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv')
+data_1 <- read.csv('C:/Users/phily/liveability-index/data/sensitivity analysis/sa_dirichlet_proximity_results_1000.csv')
 
 # reshape data - grouped by alpha and w_focus so we can calculate mean rank change for each domain
 data_summary_1 <- data_1 %>%
@@ -2736,15 +2736,15 @@ plot <- ggplot(data_summary_1, aes(x = alpha, y = mean_rank_change, color = w_fo
 print(plot)
 
 # Save the plot
-ggsave(filename = "C:/Users/phily/Liveability-Index/output/sensitivity analysis/sensitivity_analysis_proximity_plot.png", plot = plot, width = 10, height = 6)
+ggsave(filename = "C:/Users/phily/liveability-index/output/sensitivity analysis/sensitivity_analysis_proximity_plot.png", plot = plot, width = 10, height = 6, dpi = 300)
 ```
 
 # 9. Validation against IMD
 ## 9.1. Data Import
 ```{r}
-nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg')
+nb_polygon <- st_read('C:/Users/phily/liveability-index/data/neighbourhood/final_neighbourhood_polygons.gpkg')
 
-hexagon_scores <- st_read('C:/Users/phily/Liveability-Index/data/IMD/hexagon_imd.geojson')
+hexagon_scores <- st_read('C:/Users/phily/liveability-index/data/IMD/hexagon_imd.geojson')
 
 gc()
 ```
@@ -2776,14 +2776,14 @@ min(neighbourhood_imd$weighted_avg_imd)
 max(neighbourhood_imd$weighted_avg_imd)
 
 # # save data - just those with populations
-file_path = 'C:/Users/phily/Liveability-Index/data/IMD/neighbourhood_450_imd.geojson'
+file_path = 'C:/Users/phily/liveability-index/data/IMD/neighbourhood_450_imd.geojson'
 # #
 st_write(neighbourhood_imd, file_path, driver = 'GeoJSON')
 ```
 
 ## 9.3. Correlation Plots
 ```{r read in data}
-lci <- read_csv('C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
+lci <- read_csv('C:/Users/phily/liveability-index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
 gc()
 ```
 
@@ -2828,7 +2828,7 @@ plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_imd)) +
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5))
 
-file_path = 'C:/Users/phily/Liveability-Index/output/IMD/correlation_plot_450.png'
+file_path = 'C:/Users/phily/liveability-index/output/IMD/correlation_plot_450.png'
 ggsave(file_path, plot, dpi = 300, width = 6, height = 6)
 ```
 
@@ -2841,8 +2841,8 @@ res <- resid(lm_model)
 # Create a data frame for the plot
 residuals_df <- data.frame(fitted = fitted(lm_model), residual = res)
 
-residuals_df$fitted <- drop_units(residuals_df$fitted)
-residuals_df$residual <- drop_units(residuals_df$residual)
+# residuals_df$fitted <- drop_units(residuals_df$fitted)
+# residuals_df$residual <- drop_units(residuals_df$residual)
 
 # Create the plot using ggplot2
 plot1 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
@@ -2854,7 +2854,7 @@ plot1 <- ggplot(residuals_df, aes(x = fitted, y = residual)) +
   theme_minimal()+
   theme(plot.title = element_text(hjust = 0.5)) 
 
-file_path = 'C:/Users/phily/Liveability-Index/output/IMD/residual_plot_450.png'
+file_path = 'C:/Users/phily/liveability-index/output/IMD/residual_plot_450.png'
 
 ggsave(file_path, plot1, dpi = 300, width = 6, height = 6)
 ```
@@ -2862,7 +2862,6 @@ ggsave(file_path, plot1, dpi = 300, width = 6, height = 6)
 # 10. Active Travel
 ```{r}
 library(sf)
-library(here)
 library(dplyr)
 # library(rgdal)
 library(sp)
@@ -2872,10 +2871,10 @@ library(tidyverse)
 ## 10.1.  Average Footfall data at Uber H3 level 10
 ```{r footfall per hexagon}
 # average footfall score per hexagon data
-result <- read.csv("C:/Users/phily/Liveability-Index/data/footfall/average_footfall_per_hexagon.csv")
+result <- read.csv("C:/Users/phily/liveability-index/data/footfall/average_footfall_per_hexagon.csv")
 
 # read in UBER H3 level 10 hexagon cell data that covers london
-london_hex <-st_read("C:/Users/phily/Liveability-Index/data/footfall/Greater_London.json") %>% 
+london_hex <-st_read("C:/Users/phily/liveability-index/data/footfall/Greater_London.json") %>% 
   st_transform(27700)
 ```
 
@@ -2907,7 +2906,7 @@ ggplot(hex_footfall, aes(average_footfall)) +
 
 ## 10.2. Footfall Score Projection to a Neighbourhood-level
 ```{r neighbourhood polygons}
-nb_polygon <- st_read('C:/Users/phily/Liveability-Index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>% st_transform(27700)
+nb_polygon <- st_read('C:/Users/phily/liveability-index/data/neighbourhood/final_neighbourhood_polygons.gpkg') %>% st_transform(27700)
 ```
 
 
@@ -2937,8 +2936,8 @@ neighbourhood_fs <- intersection %>%
 min(neighbourhood_fs$weighted_avg_footfall) # 0.03
 max(neighbourhood_fs$weighted_avg_footfall) # 1.45
 
-# save data - just those with populations
-file_path = 'C:/Users/phily/Liveability-Index/data/footfall/footfall_nb_450.geojson'
+# save data - just those with footfall score
+file_path = 'C:/Users/phily/liveability-index/data/footfall/footfall_nb_450.geojson'
 
 st_write(neighbourhood_fs, file_path, driver = 'GeoJSON')
 gc()
@@ -2948,7 +2947,7 @@ gc()
 ## 10.3.  Difference in Active Travel Frequency between Neighbourhoods
 ```{r load and merge data}
 # liveability index
-lci <- read_csv('C:/Users/phily/Liveability-Index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
+lci <- read_csv('C:/Users/phily/liveability-index/data/domain data/final_normalised_domain_indicator_nb_450.csv')
 
 
 # neighbourhood-level footfall score
@@ -3024,7 +3023,7 @@ plot <- ggplot(merged_data, aes(x = weighted_avg_footfall, color = liveability_g
         legend.title = element_text(size = 10, face = "bold"))
 
 plot
-file_path = 'C:/Users/phily/Liveability-Index/output/active travel/normalised_fs_by_nb_groups.png'
+file_path = 'C:/Users/phily/liveability-index/output/active travel/normalised_fs_by_nb_groups.png'
 ggsave(file_path, plot, dpi = 300, height = 5, width = 7)
 ```
 Given that high liveability neighbourhood does not follow a normal distribution while the other does, the appropriate statistical test to compare the difference in active travel patterns between the two groups would be a **non-parametric test**. **Non-parametric tests** do not assume normality and are suitable for comparing distributions when at least one group does not follow a normal distribution.
@@ -3091,6 +3090,6 @@ plot <- ggplot(merged_data, aes(x = li_exp, y = weighted_avg_footfall)) +
 
 plot
 
-file_path = 'C:/Users/phily/Liveability-Index/output/active travel/ff_li_correlation.png'
+file_path = 'C:/Users/phily/liveability-index/output/active travel/ff_li_correlation.png'
 ggsave(file_path, plot, dpi = 300, width = 6, height = 6)
 ```
