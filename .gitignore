@@ -11,11 +11,12 @@
 .Rproj.user/
 
 
-# data files
-data/domain data
+# data files to be ignored
 data/boundary
+data/domain data
 data/footfall
 data/IMD
+data/network
 data/sensitivity analysis
 data/uncertainty test
-data/network
+
