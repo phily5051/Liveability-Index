@@ -2013,8 +2013,8 @@ tmap_save(plot4, 'C:/Users/phily/liveability-index/output/results/density_domain
 # Create the map plots
 # plot each map
 tm1 <- 
-  tm_shape(edges) +
-  tm_lines(col="black", alpha = 1, lwd = 0.3) +
+  # tm_shape(edges) +
+  # tm_lines(col="black", alpha = 1, lwd = 0.3) +
   tm_shape(lci_1) +
   tm_fill(col = 'pop_decile', 
           palette = "RdYlGn",
@@ -2029,8 +2029,8 @@ tm1 <-
 
 
 tm2 <- 
-  tm_shape(edges) +
-  tm_lines(col="black", alpha = 1, lwd = 0.3) +
+  # tm_shape(edges) +
+  # tm_lines(col="black", alpha = 1, lwd = 0.3) +
   tm_shape(lci_1) +
   tm_fill(col = 'div_decile', 
           palette = "RdYlGn",
@@ -2045,8 +2045,8 @@ tm2 <-
 
   
 tm3 <- 
-  tm_shape(edges) +
-  tm_lines(col="black", alpha = 1, lwd = 0.3) +
+  # tm_shape(edges) +
+  # tm_lines(col="black", alpha = 1, lwd = 0.3) +
   tm_shape(lci_1) +
   tm_fill(col = 'prox_decile', 
           palette = "RdYlGn",
@@ -2078,7 +2078,7 @@ t = tmap_arrange(tm1, tm2, tm3, legend, ncol=2)
 
 #t
 
-tmap_save(t, 'C:/Users/phily/liveability-index/output/results/combined_domain.pdf', height = 9, width = 10, dpi = 300)
+tmap_save(t, 'C:/Users/phily/liveability-index/output/results/combined_domain.png', height = 9, width = 10, dpi = 300)
 ```
 
 
